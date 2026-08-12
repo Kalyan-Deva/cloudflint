@@ -1,0 +1,13 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# local overrides, never commit real origins or certs
+cloudveil.local.yaml
+*.pem
+*.key
+
+node_modules/
+.next/
+.env*.local
+.DS_Store
