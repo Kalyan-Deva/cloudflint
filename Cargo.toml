@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/edge"]
+members = ["crates/edge", "crates/api"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,11 +11,19 @@ license = "MIT"
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 arc-swap = "1"
+regex = "1"
+lru = "0.18"
+# ring rather than aws-lc-rs: no cmake or nasm needed to build on Windows
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"
+rcgen = "0.14"
 hyper = { version = "1", features = ["server", "client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "server", "http1", "http2"] }
 http-body-util = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
+serde_json = "1"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

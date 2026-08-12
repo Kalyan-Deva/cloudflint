@@ -3,6 +3,42 @@
 
 listen: "127.0.0.1:8080"
 
+# Leave this out and the edge is plaintext only.
+tls:
+  listen: "127.0.0.1:8443"
+  # Answer the plaintext listener with a 301 to https instead of serving it.
+  redirect_http: true
+  # A handshake is expensive, and a client that starts one and then dawdles is
+  # slowloris by another route. The header timeout is no help - it only starts
+  # once there is a decrypted stream to read headers from.
+  handshake_timeout_ms: 10000
+
+# The cache store. Read once at boot - changing these needs a restart.
+cache:
+  max_bytes: 268435456 # 256 MiB across 16 shards
+  max_object_bytes: 8388608 # anything bigger is served but not kept
+
+# Connection limits and read timeouts. Node-wide, because these apply before we
+# know which zone a connection is even for. Also boot-time - changing them needs a
+# restart. Set a cap to 0 to turn it off.
+limits:
+  max_connections_per_ip: 256
+  new_connections_per_ip_per_sec: 128
+  # A client that cannot finish its headers in ten seconds is either broken or
+  # trying something. This is the one that kills slowloris.
+  header_read_timeout_ms: 10000
+  # Per frame, not per body: a slow honest upload is fine, a sender that goes quiet
+  # mid-request is not.
+  body_read_timeout_ms: 30000
+  # An upper bound on any one connection, however well behaved.
+  max_connection_age_secs: 300
+
+# Named lists the rules refer to as $name. Shared across zones.
+lists:
+  trusted:
+    - 127.0.0.1
+    - 10.0.0.0/8
+
 zones:
   - name: demo
     hostnames:
@@ -14,3 +50,96 @@ zones:
       # forward the client's Host through, the way Cloudflare does by default
       preserve_host: true
       timeout_ms: 30000
+
+    # Certificates are per zone and picked by SNI. Make one for local work with:
+    #   cargo run -p cloudveil-edge --bin cloudveil-cert -- certs demo.local localhost
+    # Edit either file and the edge reloads it without dropping a connection.
+    tls:
+      cert: "certs/demo.local.crt"
+      key: "certs/demo.local.key"
+
+    # The whole waf block is optional. Leave it out and the zone still gets the
+    # core ruleset - a waf you have to remember to switch on is a waf that is off.
+    waf:
+      # `core` is head-only and never buffers a body.
+      # Add `core-body` to inspect posted bodies too, at the cost of buffering them.
+      rulesets: [core]
+
+      # Only relevant once a body ruleset is on.
+      max_body_bytes: 131072
+      on_oversized_body: allow # or `block`, to fail closed
+
+      # Your own rules run after the built-in ones.
+      rules:
+        - id: allow-internal
+          description: Skip the rest of the waf for traffic from inside
+          expression: ip.src in $trusted
+          action: skip
+
+        - id: watch-admin
+          description: Not blocking yet - watch the logs first, then flip to block
+          expression: >-
+            http.request.uri.path contains "/admin"
+            and not ip.src in $trusted
+          action: log
+          severity: medium
+
+    # Also optional. On by default, but with no default ttl, so nothing is held
+    # unless the origin asks for it or an override below says so.
+    cache:
+      enabled: true
+
+      # Request headers that are part of the cache key.
+      vary_on: [accept-encoding]
+
+      # Serve a stale copy for this long while refreshing behind it, and for this
+      # long if the origin is down. The origin can override both via Cache-Control.
+      stale_while_revalidate_secs: 0
+      stale_if_error_secs: 60
+
+      # How long a request waits behind another request for the same key before
+      # giving up and fetching for itself.
+      coalesce_wait_ms: 5000
+
+      # Params dropped from the key. Defaults to the usual tracking junk
+      # (utm_*, gclid, fbclid, msclkid, mc_cid, mc_eid) - set it to override.
+      # ignore_query_params: [utm_source, gclid]
+
+      # Set this and only these params key the entry. Absent means all of them.
+      # key_query_params: [v]
+
+      overrides:
+        - path_prefix: "/static/"
+          ttl_secs: 604800
+          # cache it for a week whatever the origin's Cache-Control says
+          override_origin_headers: true
+
+    # Counters are per node. Two edges means twice the allowance, and that stays
+    # true until there is a shared counter store.
+    rate_limits:
+      - id: api-per-ip
+        # Optional, and the same expression language the waf rules use. It cannot
+        # look at the body - the limit is decided before we would ever buffer one.
+        match: http.request.uri.path contains "/api/"
+        key: ip # ip | ip_path | header:<name>
+        requests: 100
+        window_secs: 60
+        action: block # or `log`, to watch before enforcing
+
+      - id: login-per-ip-path
+        match: http.request.uri.path eq "/login"
+        key: ip_path
+        requests: 10
+        window_secs: 60
+        action: block
+
+    # Tightens the limits above while the origin is struggling: a limit tuned for a
+    # healthy origin is too generous for a failing one.
+    adaptive:
+      enabled: true
+      window_secs: 10
+      min_requests: 20 # don't judge a window quieter than this
+      error_ratio: 0.25 # 5xx share that counts as strain
+      slow_ms: 1000
+      slow_ratio: 0.5 # share of requests over slow_ms that counts as strain
+      tighten_to: 0.5 # multiply every limit by this while strained

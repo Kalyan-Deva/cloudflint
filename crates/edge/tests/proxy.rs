@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cloudveil_edge::snapshot::{self, Snapshot};
-use cloudveil_edge::{config, serve};
+use cloudveil_edge::{config, serve, Edge};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
@@ -75,7 +75,7 @@ async fn start(snap: Arc<Snapshot>) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        let _ = serve(listener, snap).await;
+        let _ = serve(listener, Edge::new(snap)).await;
     });
     addr
 }

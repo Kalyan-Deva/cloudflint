@@ -1,0 +1,31 @@
+[package]
+name = "cloudveil-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cloudveil control plane - config revisions, analytics, purge"
+
+[lib]
+name = "cloudveil_api"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cloudveil-api"
+path = "src/main.rs"
+
+[dependencies]
+cloudveil-edge = { path = "../edge" }
+axum = "0.8"
+tokio.workspace = true
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

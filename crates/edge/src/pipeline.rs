@@ -43,6 +43,8 @@ pub struct Ctx<'a> {
     pub cfg: &'a Config,
     pub zone: &'a Zone,
     pub started: Instant,
+    /// Whether the client reached us over https.
+    pub tls: bool,
     /// Set by the pipeline to whichever stage produced the response.
     pub decided_by: &'static str,
     req: Option<Request<Body>>,
@@ -56,6 +58,7 @@ impl<'a> Ctx<'a> {
         zone: &'a Zone,
         req: Request<Body>,
         started: Instant,
+        tls: bool,
     ) -> Self {
         Self {
             peer,
@@ -63,15 +66,24 @@ impl<'a> Ctx<'a> {
             cfg,
             zone,
             started,
+            tls,
             decided_by: "none",
             req: Some(req),
         }
     }
 
-    /// Hand the request over. Only the stage that answers may do this, and it must
-    /// answer right after, so nothing downstream ever sees an empty ctx.
+    pub fn req(&self) -> Option<&Request<Body>> {
+        self.req.as_ref()
+    }
+
+    /// Hand the request over. Either answer straight after, or put it back with
+    /// `set_req` - anything else leaves the ctx empty for the stages behind you.
     pub fn take_req(&mut self) -> Option<Request<Body>> {
         self.req.take()
+    }
+
+    pub fn set_req(&mut self, req: Request<Body>) {
+        self.req = Some(req);
     }
 
     pub fn method(&self) -> Option<&Method> {
@@ -232,6 +244,7 @@ zones:
             zone,
             req,
             Instant::now(),
+            false,
         );
         let resp = Pipeline::new(stages).run(&mut ctx).await;
         (resp, ctx.decided_by)

@@ -82,6 +82,98 @@ pub fn watch_every(path: PathBuf, snap: Arc<Snapshot>, every: Duration) {
     });
 }
 
+/// Pull config from the control plane instead of a file.
+///
+/// Same contract as the file watcher: a snapshot that doesn't parse is logged and
+/// dropped, and an unreachable control plane changes nothing. The edge keeps serving
+/// whatever it last agreed with - a control plane outage must not become an outage.
+pub fn watch_remote(base: String, snap: Arc<Snapshot>, every: Duration) {
+    tokio::spawn(async move {
+        use http_body_util::{BodyExt, Full};
+        use hyper::body::Bytes;
+        use hyper_util::client::legacy::connect::HttpConnector;
+        use hyper_util::client::legacy::Client;
+        use hyper_util::rt::TokioExecutor;
+
+        let client: Client<HttpConnector, Full<Bytes>> =
+            Client::builder(TokioExecutor::new()).build_http();
+        let endpoint = format!("{}/v1/config", base.trim_end_matches('/'));
+
+        let mut running = 0i64;
+        let mut last_err = String::new();
+
+        loop {
+            tokio::time::sleep(every).await;
+
+            match fetch(&client, &endpoint).await {
+                Ok(Some(pulled)) if pulled.revision != running => {
+                    match config::parse(&pulled.yaml) {
+                        Ok(cfg) => {
+                            info!(
+                                "config revision {} pulled from the control plane, {} zone(s)",
+                                pulled.revision,
+                                cfg.zones.len()
+                            );
+                            running = pulled.revision;
+                            last_err.clear();
+                            snap.store(cfg);
+                        }
+                        Err(e) => {
+                            /* don't record the revision, so a fixed one still lands */
+                            note_once(&mut last_err, format!("{e:#}"));
+                        }
+                    }
+                }
+                Ok(_) => last_err.clear(),
+                Err(e) => note_once(&mut last_err, e),
+            }
+        }
+
+        async fn fetch(
+            client: &Client<HttpConnector, Full<Bytes>>,
+            endpoint: &str,
+        ) -> Result<Option<Pulled>, String> {
+            let req = hyper::Request::builder()
+                .uri(endpoint)
+                .body(Full::new(Bytes::new()))
+                .map_err(|e| format!("bad control plane url: {e}"))?;
+
+            let resp = client
+                .request(req)
+                .await
+                .map_err(|e| format!("could not reach the control plane: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!("control plane answered {}", resp.status()));
+            }
+
+            let body = resp
+                .into_body()
+                .collect()
+                .await
+                .map_err(|e| format!("could not read the control plane's answer: {e}"))?
+                .to_bytes();
+
+            serde_json::from_slice::<Pulled>(&body)
+                .map(Some)
+                .map_err(|e| format!("control plane sent something unexpected: {e}"))
+        }
+    });
+}
+
+#[derive(serde::Deserialize)]
+struct Pulled {
+    revision: i64,
+    yaml: String,
+}
+
+/// Log a recurring problem once rather than every poll.
+fn note_once(last: &mut String, message: String) {
+    if *last != message {
+        warn!("config pull failed, staying on the running config: {message}");
+        *last = message;
+    }
+}
+
 /// mtime alone misses same-second rewrites often enough to be annoying; size is free.
 fn fingerprint(path: &Path) -> Option<(SystemTime, u64)> {
     let meta = std::fs::metadata(path).ok()?;

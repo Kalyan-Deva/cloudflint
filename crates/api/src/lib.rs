@@ -1,0 +1,413 @@
+//! Cloudveil control plane.
+//!
+//! Owns the config and the analytics. Never sits in anyone's request path: the edge
+//! pulls a snapshot from here and then serves traffic entirely from memory, so this
+//! process being slow, wedged or missing is a management inconvenience rather than
+//! an outage.
+
+pub mod db;
+
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use cloudveil_edge::analytics::Event;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use tracing::{info, warn};
+
+use crate::db::Db;
+
+/// Events older than this are dropped on ingest.
+const KEEP_EVENTS: Duration = Duration::from_secs(7 * 24 * 3600);
+
+#[derive(Clone)]
+pub struct Api {
+    pub db: Db,
+    /// Edge admin urls to fan purges out to. Purges have to reach the data plane -
+    /// the cache lives there, and this process can only ask.
+    pub edges: Arc<Vec<String>>,
+}
+
+pub fn router(api: Api) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/v1/config", get(get_config).put(put_config))
+        .route("/v1/config/revisions", get(list_revisions))
+        .route("/v1/config/revisions/{id}/activate", post(activate))
+        .route("/v1/events", post(ingest))
+        .route("/v1/analytics/summary", get(summary))
+        .route("/v1/zones", get(zones))
+        .route("/v1/waf/test", post(waf_test))
+        .route("/v1/purge", post(purge))
+        .with_state(api)
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+type ApiResult = Result<axum::response::Response, Problem>;
+
+/// An error with a status and a sentence, rendered as json.
+pub struct Problem(StatusCode, String);
+
+impl IntoResponse for Problem {
+    fn into_response(self) -> axum::response::Response {
+        (self.0, Json(json!({ "error": self.1 }))).into_response()
+    }
+}
+
+fn bad_request(e: impl std::fmt::Display) -> Problem {
+    Problem(StatusCode::BAD_REQUEST, format!("{e:#}"))
+}
+
+fn internal(e: impl std::fmt::Display) -> Problem {
+    Problem(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))
+}
+
+async fn health() -> impl IntoResponse {
+    Json(json!({ "status": "ok" }))
+}
+
+async fn get_config(State(api): State<Api>) -> ApiResult {
+    match api.db.active_config().map_err(internal)? {
+        Some(active) => Ok(Json(active).into_response()),
+        None => Err(Problem(
+            StatusCode::NOT_FOUND,
+            "no config has been uploaded yet".into(),
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct PutConfig {
+    pub yaml: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+async fn put_config(State(api): State<Api>, Json(body): Json<PutConfig>) -> ApiResult {
+    /* validated with the edge's own parser, so this can never hand out a config the
+       data plane would refuse - the failure lands here, at write time, not out
+       there at reload time */
+    let id = api
+        .db
+        .put_config(&body.yaml, &body.note, now_ms())
+        .map_err(bad_request)?;
+
+    info!("config revision {id} stored and made active");
+    Ok((StatusCode::CREATED, Json(json!({ "revision": id }))).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct Limit {
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+async fn list_revisions(State(api): State<Api>, Query(q): Query<Limit>) -> ApiResult {
+    let revisions = api
+        .db
+        .revisions(q.limit.unwrap_or(50).min(500))
+        .map_err(internal)?;
+    Ok(Json(revisions).into_response())
+}
+
+async fn activate(State(api): State<Api>, Path(id): Path<i64>) -> ApiResult {
+    api.db.activate(id).map_err(bad_request)?;
+    info!("config revision {id} activated");
+    Ok(Json(json!({ "revision": id })).into_response())
+}
+
+async fn ingest(State(api): State<Api>, Json(events): Json<Vec<Event>>) -> ApiResult {
+    if events.is_empty() {
+        return Ok(Json(json!({ "stored": 0 })).into_response());
+    }
+    let stored = api.db.insert_events(&events).map_err(internal)?;
+
+    let cutoff = now_ms() - KEEP_EVENTS.as_millis() as i64;
+    if let Err(e) = api.db.prune_events(cutoff) {
+        warn!("could not prune old events: {e}");
+    }
+    Ok(Json(json!({ "stored": stored })).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct SummaryQuery {
+    #[serde(default)]
+    pub zone: Option<String>,
+    #[serde(default)]
+    pub since_mins: Option<i64>,
+}
+
+async fn summary(State(api): State<Api>, Query(q): Query<SummaryQuery>) -> ApiResult {
+    let since = now_ms() - q.since_mins.unwrap_or(60).clamp(1, 60 * 24 * 30) * 60_000;
+    let summary = api
+        .db
+        .summary(q.zone.as_deref(), since)
+        .map_err(internal)?;
+    Ok(Json(summary).into_response())
+}
+
+#[derive(Debug, Serialize)]
+pub struct ZoneView {
+    pub name: String,
+    pub hostnames: Vec<String>,
+    pub origin: String,
+    pub preserve_host: bool,
+    pub origin_timeout_ms: u64,
+    pub waf_rules: Vec<String>,
+    pub waf_reads_body: bool,
+    pub cache_enabled: bool,
+    pub cache_vary_on: Vec<String>,
+    pub cache_overrides: Vec<String>,
+    pub rate_limits: Vec<String>,
+    pub adaptive: bool,
+}
+
+/// The active config, read back as structure rather than yaml, so the dashboard
+/// doesn't have to parse it and can't disagree with the edge about what it means.
+async fn zones(State(api): State<Api>) -> ApiResult {
+    let Some(active) = api.db.active_config().map_err(internal)? else {
+        return Err(Problem(
+            StatusCode::NOT_FOUND,
+            "no config has been uploaded yet".into(),
+        ));
+    };
+    let cfg = cloudveil_edge::config::parse(&active.yaml).map_err(internal)?;
+
+    let views: Vec<ZoneView> = cfg
+        .zones
+        .iter()
+        .map(|z| ZoneView {
+            name: z.name.clone(),
+            hostnames: z.hostnames.clone(),
+            origin: format!("{}://{}", z.origin.scheme, z.origin.authority),
+            preserve_host: z.origin.preserve_host,
+            origin_timeout_ms: z.origin.timeout.as_millis() as u64,
+            waf_rules: z.waf.rules.rule_ids().iter().map(|s| s.to_string()).collect(),
+            waf_reads_body: z.waf.rules.needs_body(),
+            cache_enabled: z.cache.enabled,
+            cache_vary_on: z.cache.vary_on.clone(),
+            cache_overrides: z
+                .cache
+                .overrides
+                .iter()
+                .map(|o| format!("{} for {}s", o.path_prefix, o.ttl.as_secs()))
+                .collect(),
+            rate_limits: z
+                .rate_limits
+                .iter()
+                .map(|r| format!("{}: {}/{}s", r.id, r.requests, r.window.as_secs()))
+                .collect(),
+            adaptive: z.adaptive.enabled,
+        })
+        .collect();
+
+    Ok(Json(json!({ "revision": active.revision, "zones": views })).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct WafTest {
+    pub zone: String,
+    /// Test unsaved rules by passing the yaml; omit to use the active config.
+    #[serde(default)]
+    pub yaml: Option<String>,
+    #[serde(default = "get_method")]
+    pub method: String,
+    #[serde(default = "root")]
+    pub path: String,
+    #[serde(default)]
+    pub query: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+    #[serde(default = "example_ip")]
+    pub ip: String,
+    /// Pretend the request arrived over https, for rules that check `ssl`.
+    #[serde(default)]
+    pub tls: bool,
+}
+
+fn get_method() -> String {
+    "GET".into()
+}
+fn root() -> String {
+    "/".into()
+}
+fn example_ip() -> String {
+    "203.0.113.9".into()
+}
+
+/// Run a made-up request against a zone's rules and report everything it touches.
+///
+/// This is the whole reason the control plane links the edge crate: the answer here
+/// has to be the answer the edge would give, not a second implementation that drifts.
+async fn waf_test(State(api): State<Api>, Json(t): Json<WafTest>) -> ApiResult {
+    use cloudveil_edge::waf::{decode, Input};
+
+    let yaml = match t.yaml {
+        Some(yaml) => yaml,
+        None => {
+            api.db
+                .active_config()
+                .map_err(internal)?
+                .ok_or_else(|| Problem(StatusCode::NOT_FOUND, "no config yet".into()))?
+                .yaml
+        }
+    };
+    let cfg = cloudveil_edge::config::parse(&yaml).map_err(bad_request)?;
+    let zone = cfg
+        .zones
+        .iter()
+        .find(|z| z.name == t.zone)
+        .ok_or_else(|| bad_request(format!("no zone called `{}`", t.zone)))?;
+
+    let mut headers = hyper::HeaderMap::new();
+    for (name, value) in &t.headers {
+        let name = hyper::header::HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| bad_request(format!("bad header name `{name}`")))?;
+        let value = hyper::header::HeaderValue::from_str(value)
+            .map_err(|_| bad_request(format!("bad header value for `{name}`")))?;
+        headers.append(name, value);
+    }
+    let ip = t
+        .ip
+        .parse()
+        .map_err(|_| bad_request(format!("`{}` is not an ip address", t.ip)))?;
+
+    /* decoded exactly as the edge decodes it, or the tester would lie */
+    let path = decode(&t.path, false);
+    let query = decode(&t.query, true);
+    let raw_uri = if t.query.is_empty() {
+        t.path.clone()
+    } else {
+        format!("{}?{}", t.path, t.query)
+    };
+    let uri = decode(&raw_uri, true);
+
+    let explained = zone.waf.rules.explain(
+        &Input {
+            method: &t.method,
+            uri: &uri,
+            path: &path,
+            query: &query,
+            host: zone.hostnames.first().map(|s| s.as_str()).unwrap_or(""),
+            body: &t.body,
+            headers: &headers,
+            ip,
+            tls: t.tls,
+        },
+        !t.body.is_empty(),
+    );
+
+    Ok(Json(explained).into_response())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PurgeRequest {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub tag: Option<String>,
+    #[serde(default)]
+    pub zone: Option<String>,
+    #[serde(default)]
+    pub all: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EdgeResult {
+    pub edge: String,
+    pub ok: bool,
+    pub detail: String,
+}
+
+async fn purge(State(api): State<Api>, Json(ask): Json<PurgeRequest>) -> ApiResult {
+    let set = [ask.url.is_some(), ask.tag.is_some(), ask.zone.is_some(), ask.all]
+        .iter()
+        .filter(|x| **x)
+        .count();
+    if set != 1 {
+        return Err(bad_request("give exactly one of url, tag, zone or all"));
+    }
+    if api.edges.is_empty() {
+        return Err(Problem(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no edges are configured to purge".into(),
+        ));
+    }
+
+    let body = serde_json::to_vec(&ask).map_err(internal)?;
+    let mut results = Vec::with_capacity(api.edges.len());
+    for edge in api.edges.iter() {
+        results.push(ask_edge(edge, &body).await);
+    }
+
+    /* report per edge rather than collapsing to one status: "mostly purged" is a
+       thing that happens, and hiding it would be worse than saying so */
+    let all_ok = results.iter().all(|r| r.ok);
+    let status = if all_ok {
+        StatusCode::OK
+    } else {
+        StatusCode::MULTI_STATUS
+    };
+    Ok((status, Json(json!({ "edges": results }))).into_response())
+}
+
+async fn ask_edge(base: &str, body: &[u8]) -> EdgeResult {
+    use http_body_util::{BodyExt, Full};
+    use hyper::body::Bytes;
+    use hyper_util::client::legacy::connect::HttpConnector;
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::TokioExecutor;
+
+    let client: Client<HttpConnector, Full<Bytes>> =
+        Client::builder(TokioExecutor::new()).build_http();
+    let url = format!("{}/admin/purge", base.trim_end_matches('/'));
+
+    let req = hyper::Request::builder()
+        .method(hyper::Method::POST)
+        .uri(&url)
+        .header("content-type", "application/json")
+        .body(Full::new(Bytes::copy_from_slice(body)));
+
+    let Ok(req) = req else {
+        return EdgeResult {
+            edge: base.to_owned(),
+            ok: false,
+            detail: "bad edge url".into(),
+        };
+    };
+
+    match client.request(req).await {
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp
+                .into_body()
+                .collect()
+                .await
+                .map(|b| String::from_utf8_lossy(&b.to_bytes()).into_owned())
+                .unwrap_or_default();
+            EdgeResult {
+                edge: base.to_owned(),
+                ok: status.is_success(),
+                detail: body,
+            }
+        }
+        Err(e) => EdgeResult {
+            edge: base.to_owned(),
+            ok: false,
+            detail: format!("unreachable: {e}"),
+        },
+    }
+}
