@@ -2,6 +2,7 @@
 //! into the types the request path actually uses, so nothing gets parsed per request.
 
 use std::net::SocketAddr;
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -45,9 +46,11 @@ impl Config {
     }
 }
 
-pub fn load(path: &str) -> Result<Config> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
-    parse(&text).with_context(|| format!("in {path}"))
+pub fn load(path: impl AsRef<Path>) -> Result<Config> {
+    let path = path.as_ref();
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    parse(&text).with_context(|| format!("in {}", path.display()))
 }
 
 pub fn parse(text: &str) -> Result<Config> {

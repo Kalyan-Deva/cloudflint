@@ -9,6 +9,8 @@ license = "MIT"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+arc-swap = "1"
 hyper = { version = "1", features = ["server", "client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "server", "http1", "http2"] }
 http-body-util = "0.1"

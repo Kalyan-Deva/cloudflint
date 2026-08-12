@@ -1,9 +1,12 @@
-//! End to end: real origin, real proxy, real sockets.
+//! End to end: real origins, real proxy, real sockets.
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use cloudveil_edge::snapshot::{self, Snapshot};
 use cloudveil_edge::{config, serve};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
@@ -15,8 +18,10 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
 
-/// Origin that reports back what the proxy sent it.
-async fn echo(req: Request<Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
+const TICK: Duration = Duration::from_millis(20);
+
+/// Origin that reports back who it is and what the proxy sent it.
+async fn echo(tag: &'static str, req: Request<Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
     let get = |k: &str| {
         req.headers()
             .get(k)
@@ -25,7 +30,7 @@ async fn echo(req: Request<Incoming>) -> Result<Response<Full<Bytes>>, Infallibl
             .to_owned()
     };
     let body = format!(
-        "path={} host={} xff={} xfh={} xfp={}",
+        "origin={tag} path={} host={} xff={} xfh={} xfp={}",
         req.uri().path(),
         get("host"),
         get("x-forwarded-for"),
@@ -33,13 +38,13 @@ async fn echo(req: Request<Incoming>) -> Result<Response<Full<Bytes>>, Infallibl
         get("x-forwarded-proto"),
     );
     Ok(Response::builder()
-        .header("x-origin", "yes")
+        .header("x-origin", tag)
         .header("trailer", "x-should-be-stripped") /* hop-by-hop */
         .body(Full::new(Bytes::from(body)))
         .unwrap())
 }
 
-async fn spawn_origin() -> SocketAddr {
+async fn spawn_origin(tag: &'static str) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -47,7 +52,7 @@ async fn spawn_origin() -> SocketAddr {
             tokio::spawn(async move {
                 let io = TokioIo::new(stream);
                 let _ = http1::Builder::new()
-                    .serve_connection(io, service_fn(echo))
+                    .serve_connection(io, service_fn(move |req| echo(tag, req)))
                     .await;
             });
         }
@@ -55,22 +60,29 @@ async fn spawn_origin() -> SocketAddr {
     addr
 }
 
-async fn spawn_proxy(origin: SocketAddr, preserve_host: bool) -> SocketAddr {
-    let text = format!(
+fn zone_yaml(origin: SocketAddr, preserve_host: bool) -> String {
+    format!(
         "zones:\n  \
          - name: demo\n    \
            hostnames: [\"demo.local\"]\n    \
            origin:\n      \
              url: \"http://{origin}\"\n      \
              preserve_host: {preserve_host}\n"
-    );
-    let cfg = Arc::new(config::parse(&text).expect("test config should parse"));
+    )
+}
+
+async fn start(snap: Arc<Snapshot>) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        let _ = serve(listener, cfg).await;
+        let _ = serve(listener, snap).await;
     });
     addr
+}
+
+async fn spawn_proxy(origin: SocketAddr, preserve_host: bool) -> SocketAddr {
+    let cfg = config::parse(&zone_yaml(origin, preserve_host)).expect("test config should parse");
+    start(Arc::new(Snapshot::new(cfg))).await
 }
 
 fn client() -> Client<HttpConnector, Full<Bytes>> {
@@ -92,7 +104,7 @@ async fn get(proxy: SocketAddr, host: &str, path: &str) -> (StatusCode, hyper::H
 
 #[tokio::test]
 async fn forwards_to_the_origin() {
-    let origin = spawn_origin().await;
+    let origin = spawn_origin("a").await;
     let proxy = spawn_proxy(origin, true).await;
 
     let (status, headers, body) = get(proxy, "demo.local", "/hello?a=1").await;
@@ -102,13 +114,13 @@ async fn forwards_to_the_origin() {
     assert!(body.contains("xfh=demo.local"), "body was {body}");
     assert!(body.contains("xff=127.0.0.1"), "body was {body}");
     assert!(body.contains("xfp=http"), "body was {body}");
-    assert_eq!(headers.get("x-origin").unwrap(), "yes");
+    assert_eq!(headers.get("x-origin").unwrap(), "a");
     assert_eq!(headers.get("server").unwrap(), "cloudveil");
 }
 
 #[tokio::test]
 async fn preserves_the_client_host_by_default() {
-    let origin = spawn_origin().await;
+    let origin = spawn_origin("a").await;
     let proxy = spawn_proxy(origin, true).await;
 
     let (_, _, body) = get(proxy, "demo.local", "/").await;
@@ -117,7 +129,7 @@ async fn preserves_the_client_host_by_default() {
 
 #[tokio::test]
 async fn rewrites_host_when_asked() {
-    let origin = spawn_origin().await;
+    let origin = spawn_origin("a").await;
     let proxy = spawn_proxy(origin, false).await;
 
     let (_, _, body) = get(proxy, "demo.local", "/").await;
@@ -126,7 +138,7 @@ async fn rewrites_host_when_asked() {
 
 #[tokio::test]
 async fn strips_hop_by_hop_from_the_response() {
-    let origin = spawn_origin().await;
+    let origin = spawn_origin("a").await;
     let proxy = spawn_proxy(origin, true).await;
 
     let (_, headers, _) = get(proxy, "demo.local", "/").await;
@@ -135,7 +147,7 @@ async fn strips_hop_by_hop_from_the_response() {
 
 #[tokio::test]
 async fn unknown_host_gets_404() {
-    let origin = spawn_origin().await;
+    let origin = spawn_origin("a").await;
     let proxy = spawn_proxy(origin, true).await;
 
     let (status, _, body) = get(proxy, "nobody.local", "/").await;
@@ -154,4 +166,36 @@ async fn dead_origin_gets_502() {
 
     let (status, _, _) = get(proxy, "demo.local", "/").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn moves_traffic_to_a_new_origin_on_reload() {
+    let a = spawn_origin("a").await;
+    let b = spawn_origin("b").await;
+
+    let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let path: PathBuf = std::env::temp_dir().join(format!("cloudveil-e2e-{unique}.yaml"));
+    std::fs::write(&path, zone_yaml(a, true)).unwrap();
+
+    let snap = Arc::new(Snapshot::new(config::load(&path).unwrap()));
+    snapshot::watch_every(path.clone(), snap.clone(), TICK);
+    let proxy = start(snap).await;
+
+    let (_, _, body) = get(proxy, "demo.local", "/").await;
+    assert!(body.contains("origin=a"), "body was {body}");
+
+    std::fs::write(&path, zone_yaml(b, true)).unwrap();
+
+    let mut moved = false;
+    for _ in 0..100 {
+        tokio::time::sleep(TICK).await;
+        let (_, _, body) = get(proxy, "demo.local", "/").await;
+        if body.contains("origin=b") {
+            moved = true;
+            break;
+        }
+    }
+    assert!(moved, "traffic never moved to the reloaded origin");
+
+    let _ = std::fs::remove_file(&path);
 }
