@@ -123,7 +123,8 @@ zones:
       - url: "http://127.0.0.1:8081"
       - url: "http://127.0.0.1:8082"
     origin_policy:
-      strategy: first_healthy # or round_robin
+      # first_healthy | round_robin | weighted | least_connections
+      strategy: first_healthy
       unhealthy_after: 3 # consecutive failures before it is taken out
       retry_after_secs: 10 # how long it stays out
       probe: # optional active checks
@@ -204,7 +205,17 @@ compression is a deferral, not a feature.
 
 ### Origins and failover
 
-A zone's `origins` are tried in health order. Passive health comes free from real traffic:
+A zone's `origins` are tried in health order, and the strategy decides among the healthy
+ones — an origin that is out of rotation never takes a turn or a share of the weights:
+
+| strategy | |
+|---|---|
+| `first_healthy` | earlier entries win: a primary with backups behind it |
+| `round_robin` | one each in turn |
+| `weighted` | in proportion to each origin's `weight`, interleaved rather than in runs |
+| `least_connections` | fewest requests in flight, which follows how long requests actually take |
+
+Passive health comes free from real traffic:
 after `unhealthy_after` consecutive failures a backend is taken out for
 `retry_after_secs`. Active `probe`s cost a request every few seconds and are the only way
 a recovered backend comes back without a user finding it first.

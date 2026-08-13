@@ -123,7 +123,13 @@ impl Fetcher {
             };
 
             let started = Instant::now();
+            /* counted for exactly as long as the request is out, which is what
+               least_connections sorts on. A guard rather than two calls, so an early
+               return cannot leak a count and strand a backend at the bottom of the
+               order forever */
+            let counted = self.health.as_ref().map(|h| InFlight::new(h, zone, origin));
             let out = self.send(origin, host, peer, tls, sending).await;
+            drop(counted);
             let kind = kind_of(&out);
 
             let authority = origin.authority.as_str();
@@ -281,6 +287,34 @@ fn kind_of(out: &Result<Response<Body>, StageError>) -> Option<&'static str> {
         Ok(_) => None,
         Err(e) if e.status == StatusCode::GATEWAY_TIMEOUT => Some("timeout"),
         Err(_) => Some("unreachable"),
+    }
+}
+
+/// Holds an origin's in-flight count for the life of one request.
+///
+/// The count only decrements when this is dropped, so a cancelled request - a client that
+/// goes away mid-flight - releases it too. A pair of increment/decrement calls would not:
+/// dropping a future runs destructors, it does not run the rest of the function.
+struct InFlight<'a> {
+    health: &'a Health,
+    zone: &'a str,
+    origin: &'a config::Origin,
+}
+
+impl<'a> InFlight<'a> {
+    fn new(health: &'a Health, zone: &'a str, origin: &'a config::Origin) -> Self {
+        health.started(zone, origin);
+        InFlight {
+            health,
+            zone,
+            origin,
+        }
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.health.finished(self.zone, self.origin);
     }
 }
 

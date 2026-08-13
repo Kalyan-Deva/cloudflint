@@ -107,6 +107,9 @@ pub struct Origin {
     pub authority: Authority,
     pub preserve_host: bool,
     pub timeout: Duration,
+    /// Share of traffic under `weighted`, relative to the other origins. Ignored by
+    /// every other strategy.
+    pub weight: u32,
 }
 
 /// A zone's backends, in the order they should be tried, plus what to do when one of
@@ -131,8 +134,27 @@ pub enum Strategy {
     /// Earlier origins are preferred: a primary with backups behind it.
     #[default]
     FirstHealthy,
-    /// Spread requests across everything healthy.
+    /// Spread requests across everything healthy, one each in turn.
     RoundRobin,
+    /// Round-robin in proportion to each origin's `weight`, for backends of different
+    /// sizes.
+    Weighted,
+    /// Whichever healthy origin has the fewest requests in flight. Follows how long
+    /// requests actually take rather than assuming they are all alike.
+    LeastConnections,
+}
+
+impl Strategy {
+    /// The name it is written as in config, so nothing else has to keep its own copy of
+    /// this mapping.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Strategy::FirstHealthy => "first_healthy",
+            Strategy::RoundRobin => "round_robin",
+            Strategy::Weighted => "weighted",
+            Strategy::LeastConnections => "least_connections",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -414,11 +436,16 @@ fn origin_from(zone: &str, o: raw::Origin) -> Result<Origin> {
         bail!("zone `{zone}`: origin timeout_ms must be > 0");
     }
 
+    if o.weight == 0 {
+        bail!("zone `{zone}`: origin weight must be > 0 - to take a backend out, remove it");
+    }
+
     Ok(Origin {
         scheme,
         authority,
         preserve_host: o.preserve_host,
         timeout: Duration::from_millis(o.timeout_ms),
+        weight: o.weight,
     })
 }
 
@@ -477,10 +504,18 @@ fn pool_from(
     let strategy = match policy.strategy.as_str() {
         "first_healthy" => Strategy::FirstHealthy,
         "round_robin" => Strategy::RoundRobin,
+        "weighted" => Strategy::Weighted,
+        "least_connections" => Strategy::LeastConnections,
         other => bail!(
-            "zone `{zone}`: origin strategy `{other}` (have: first_healthy, round_robin)"
+            "zone `{zone}`: origin strategy `{other}` (have: first_healthy, round_robin, \
+             weighted, least_connections)"
         ),
     };
+    if strategy == Strategy::Weighted && origins.iter().all(|o| o.weight == 1) && origins.len() > 1 {
+        /* every weight left at the default makes this plain round-robin with more
+           machinery, which is almost certainly not what somebody meant to write */
+        bail!("zone `{zone}`: strategy is weighted but no origin has a weight - set some, or use round_robin");
+    }
     if policy.unhealthy_after == 0 {
         bail!("zone `{zone}`: origin_policy.unhealthy_after must be > 0, or nothing is ever taken out");
     }
@@ -876,6 +911,9 @@ mod raw {
         pub preserve_host: bool,
         #[serde(default = "default_timeout_ms")]
         pub timeout_ms: u64,
+        /// Only read by the `weighted` strategy.
+        #[serde(default = "default_weight")]
+        pub weight: u32,
     }
 
     fn default_listen() -> SocketAddr {
@@ -883,6 +921,9 @@ mod raw {
     }
     fn yes() -> bool {
         true
+    }
+    fn default_weight() -> u32 {
+        1
     }
     fn default_timeout_ms() -> u64 {
         30_000

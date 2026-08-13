@@ -40,6 +40,12 @@ struct State {
     down_until: Option<Instant>,
     /// When a probe last went out, so one ticker can serve every interval.
     last_probe: Option<Instant>,
+    /// Requests sent and not yet answered. What `least_connections` sorts on.
+    in_flight: u32,
+    /// Credit for the weighted round-robin, in the smooth variant: every pick adds each
+    /// origin's weight and takes the highest, which spreads a 3:1 split as ABAA rather
+    /// than AAAB.
+    credit: i64,
 }
 
 impl State {
@@ -49,6 +55,8 @@ impl State {
             successes: 0,
             down_until: None,
             last_probe: None,
+            in_flight: 0,
+            credit: 0,
         }
     }
 
@@ -86,32 +94,109 @@ impl Health {
 
     /// The order to try origins in: everything healthy first, in the strategy's order,
     /// then everything else. Never empty for a non-empty pool - see the module note.
+    ///
+    /// The balancing strategies all decide among the *healthy* origins, which is why the
+    /// split happens after the ordering rather than before it: an unhealthy backend
+    /// should not be able to consume a turn or a share of the weights.
     pub fn candidates(&self, zone: &str, pool: &OriginPool) -> Vec<usize> {
         let now = Instant::now();
-        let states = self.states.lock().unwrap_or_else(|e| e.into_inner());
+        let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
 
-        let healthy = |i: usize| {
+        let all: Vec<usize> = (0..pool.origins.len()).collect();
+        let (mut up, down): (Vec<usize>, Vec<usize>) = all.into_iter().partition(|i| {
             states
-                .get(&key(zone, &pool.origins[i]))
+                .get(&key(zone, &pool.origins[*i]))
                 .map(|s| s.healthy(now))
                 .unwrap_or(true)
-        };
+        });
 
-        let order: Vec<usize> = match pool.strategy {
-            Strategy::FirstHealthy => (0..pool.origins.len()).collect(),
+        match pool.strategy {
+            /* already in preference order */
+            Strategy::FirstHealthy => {}
             Strategy::RoundRobin => {
-                let mut next = self.next.lock().unwrap_or_else(|e| e.into_inner());
-                let cursor = next.entry(zone.to_owned()).or_insert(0);
-                let start = *cursor % pool.origins.len();
-                *cursor = start + 1;
-                (0..pool.origins.len())
-                    .map(|n| (start + n) % pool.origins.len())
-                    .collect()
+                if up.len() > 1 {
+                    let mut next = self.next.lock().unwrap_or_else(|e| e.into_inner());
+                    let cursor = next.entry(zone.to_owned()).or_insert(0);
+                    let start = *cursor % up.len();
+                    *cursor = start + 1;
+                    up.rotate_left(start);
+                }
             }
-        };
+            Strategy::Weighted => {
+                if up.len() > 1 {
+                    let chosen = self.weighted_pick(zone, pool, &up, &mut states);
+                    /* the winner first, the rest behind it as fallbacks */
+                    if let Some(at) = up.iter().position(|i| *i == chosen) {
+                        up.rotate_left(at);
+                    }
+                }
+            }
+            Strategy::LeastConnections => {
+                up.sort_by_key(|i| {
+                    states
+                        .get(&key(zone, &pool.origins[*i]))
+                        .map(|s| s.in_flight)
+                        .unwrap_or(0)
+                });
+            }
+        }
 
-        let (up, down): (Vec<usize>, Vec<usize>) = order.into_iter().partition(|i| healthy(*i));
         up.into_iter().chain(down).collect()
+    }
+
+    /// Smooth weighted round-robin: every pick gives each origin its weight in credit and
+    /// takes whoever has the most, then charges the winner the total. A 3:1 split comes
+    /// out ABAA rather than AAAB, which matters because the bursty version parks three
+    /// requests on one backend and then idles it.
+    fn weighted_pick(
+        &self,
+        zone: &str,
+        pool: &OriginPool,
+        up: &[usize],
+        states: &mut HashMap<Key, State>,
+    ) -> usize {
+        let total: i64 = up.iter().map(|i| pool.origins[*i].weight as i64).sum();
+
+        let mut best = up[0];
+        let mut best_credit = i64::MIN;
+        for &i in up {
+            let origin = &pool.origins[i];
+            let state = states.entry(key(zone, origin)).or_insert_with(State::new);
+            state.credit += origin.weight as i64;
+            if state.credit > best_credit {
+                best_credit = state.credit;
+                best = i;
+            }
+        }
+
+        if let Some(state) = states.get_mut(&key(zone, &pool.origins[best])) {
+            state.credit -= total;
+        }
+        best
+    }
+
+    /// Counts a request against an origin for as long as it is in flight. Only
+    /// `least_connections` reads this, but it is cheap enough to keep always.
+    pub fn started(&self, zone: &str, origin: &Origin) {
+        let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
+        let state = states.entry(key(zone, origin)).or_insert_with(State::new);
+        state.in_flight = state.in_flight.saturating_add(1);
+    }
+
+    pub fn finished(&self, zone: &str, origin: &Origin) {
+        let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(state) = states.get_mut(&key(zone, origin)) {
+            state.in_flight = state.in_flight.saturating_sub(1);
+        }
+    }
+
+    pub fn in_flight(&self, zone: &str, origin: &Origin) -> u32 {
+        self.states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key(zone, origin))
+            .map(|s| s.in_flight)
+            .unwrap_or(0)
     }
 
     pub fn record_success(&self, zone: &str, origin: &Origin, healthy_after: u32) {
@@ -486,6 +571,134 @@ zones:
         for _ in 0..4 {
             assert_eq!(health.candidates("demo", &pool), vec![0, 1]);
         }
+    }
+
+    #[test]
+    fn weighted_spreads_in_proportion_and_smoothly() {
+        let pool = pool(
+            r#"
+zones:
+  - name: demo
+    hostnames: ["demo.local"]
+    origins:
+      - url: "http://10.0.0.1:80"
+        weight: 3
+      - url: "http://10.0.0.2:80"
+        weight: 1
+    origin_policy:
+      strategy: weighted
+"#,
+        );
+        let health = Health::new();
+
+        let picks: Vec<usize> = (0..8)
+            .map(|_| health.candidates("demo", &pool)[0])
+            .collect();
+
+        /* three of the first for every one of the second */
+        assert_eq!(picks.iter().filter(|p| **p == 0).count(), 6);
+        assert_eq!(picks.iter().filter(|p| **p == 1).count(), 2);
+        /* and interleaved rather than in a run: the bursty version would park three
+           requests on one backend and then idle it */
+        assert_eq!(picks[..4], [0, 0, 1, 0], "picks were {picks:?}");
+    }
+
+    #[test]
+    fn weighted_ignores_an_unhealthy_origins_share() {
+        let pool = pool(
+            r#"
+zones:
+  - name: demo
+    hostnames: ["demo.local"]
+    origins:
+      - url: "http://10.0.0.1:80"
+        weight: 5
+      - url: "http://10.0.0.2:80"
+        weight: 1
+    origin_policy:
+      strategy: weighted
+      unhealthy_after: 1
+      retry_after_secs: 60
+"#,
+        );
+        let health = Health::new();
+        health.record_failure("demo", &pool.origins[0], &pool);
+
+        /* the heavy origin is out, so every pick is the light one - its weight does not
+           entitle it to turns it cannot serve */
+        for _ in 0..4 {
+            assert_eq!(health.candidates("demo", &pool)[0], 1);
+        }
+    }
+
+    #[test]
+    fn least_connections_prefers_the_idle_origin() {
+        let pool = pool(
+            r#"
+zones:
+  - name: demo
+    hostnames: ["demo.local"]
+    origins:
+      - url: "http://10.0.0.1:80"
+      - url: "http://10.0.0.2:80"
+    origin_policy:
+      strategy: least_connections
+"#,
+        );
+        let health = Health::new();
+
+        health.started("demo", &pool.origins[0]);
+        health.started("demo", &pool.origins[0]);
+        assert_eq!(health.candidates("demo", &pool)[0], 1, "the busy one is second");
+        assert_eq!(health.in_flight("demo", &pool.origins[0]), 2);
+
+        health.started("demo", &pool.origins[1]);
+        health.started("demo", &pool.origins[1]);
+        health.started("demo", &pool.origins[1]);
+        assert_eq!(health.candidates("demo", &pool)[0], 0, "now the other way round");
+
+        /* finishing releases the count */
+        for _ in 0..3 {
+            health.finished("demo", &pool.origins[1]);
+        }
+        assert_eq!(health.in_flight("demo", &pool.origins[1]), 0);
+        assert_eq!(health.candidates("demo", &pool)[0], 1);
+    }
+
+    #[test]
+    fn a_finish_without_a_start_cannot_go_negative() {
+        let pool = two();
+        let health = Health::new();
+        health.finished("demo", &pool.origins[0]);
+        assert_eq!(health.in_flight("demo", &pool.origins[0]), 0);
+    }
+
+    #[test]
+    fn round_robin_only_turns_among_healthy_origins() {
+        let pool = pool(
+            r#"
+zones:
+  - name: demo
+    hostnames: ["demo.local"]
+    origins:
+      - url: "http://10.0.0.1:80"
+      - url: "http://10.0.0.2:80"
+      - url: "http://10.0.0.3:80"
+    origin_policy:
+      strategy: round_robin
+      unhealthy_after: 1
+      retry_after_secs: 60
+"#,
+        );
+        let health = Health::new();
+        health.record_failure("demo", &pool.origins[1], &pool);
+
+        /* two healthy origins left, so the turn alternates between those two and the
+           dead one never takes a turn */
+        let picks: Vec<usize> = (0..4)
+            .map(|_| health.candidates("demo", &pool)[0])
+            .collect();
+        assert_eq!(picks, vec![0, 2, 0, 2], "picks were {picks:?}");
     }
 
     #[test]

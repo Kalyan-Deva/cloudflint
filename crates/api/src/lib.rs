@@ -348,10 +348,7 @@ async fn zones(State(api): State<Api>) -> ApiResult {
             /* the first origin, for anything that only has room for one */
             origin: z.origins.urls().first().cloned().unwrap_or_default(),
             origins: z.origins.urls(),
-            origin_strategy: match z.origins.strategy {
-                cloudveil_edge::config::Strategy::RoundRobin => "round_robin",
-                cloudveil_edge::config::Strategy::FirstHealthy => "first_healthy",
-            },
+            origin_strategy: z.origins.strategy.as_str(),
             origin_probe: z.origins.probe.as_ref().map(|p| p.path.clone()),
             preserve_host: z.origins.first().preserve_host,
             origin_timeout_ms: z.origins.first().timeout.as_millis() as u64,

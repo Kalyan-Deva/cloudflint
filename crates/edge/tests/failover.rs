@@ -31,6 +31,8 @@ struct Backend {
     addr: SocketAddr,
     hits: Arc<AtomicUsize>,
     sick: Arc<AtomicBool>,
+    /// Milliseconds to dawdle before answering, so a request can be caught in flight.
+    slow: Arc<AtomicUsize>,
 }
 
 async fn spawn_backend(tag: &'static str) -> Backend {
@@ -38,20 +40,28 @@ async fn spawn_backend(tag: &'static str) -> Backend {
     let addr = listener.local_addr().unwrap();
     let hits = Arc::new(AtomicUsize::new(0));
     let sick = Arc::new(AtomicBool::new(false));
+    let slow = Arc::new(AtomicUsize::new(0));
 
     {
         let hits = hits.clone();
         let sick = sick.clone();
+        let slow = slow.clone();
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let hits = hits.clone();
                 let sick = sick.clone();
+                let slow = slow.clone();
                 tokio::spawn(async move {
                     let svc = service_fn(move |req: Request<Incoming>| {
                         let hits = hits.clone();
                         let sick = sick.clone();
+                        let slow = slow.clone();
                         async move {
                             hits.fetch_add(1, Ordering::SeqCst);
+                            let wait = slow.load(Ordering::SeqCst);
+                            if wait > 0 {
+                                tokio::time::sleep(Duration::from_millis(wait as u64)).await;
+                            }
                             let status = match sick.load(Ordering::SeqCst) {
                                 true => StatusCode::INTERNAL_SERVER_ERROR,
                                 false => StatusCode::OK,
@@ -76,7 +86,12 @@ async fn spawn_backend(tag: &'static str) -> Backend {
         });
     }
 
-    Backend { addr, hits, sick }
+    Backend {
+        addr,
+        hits,
+        sick,
+        slow,
+    }
 }
 
 /// A port nothing is listening on, so connecting to it is refused immediately.
@@ -297,6 +312,61 @@ async fn round_robin_spreads_requests_across_the_pool() {
 
     assert_eq!(one.hits.load(Ordering::SeqCst), 3);
     assert_eq!(two.hits.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn weighted_sends_traffic_in_proportion() {
+    let big = spawn_backend("big").await;
+    let small = spawn_backend("small").await;
+
+    let list = format!(
+        "      - url: \"http://{}\"\n        weight: 3\n      - url: \"http://{}\"\n        weight: 1\n",
+        big.addr, small.addr
+    );
+    let yaml = format!(
+        "zones:\n  - name: demo\n    hostnames: [\"demo.local\"]\n    origins:\n{list}    \
+         origin_policy:\n      strategy: weighted\n    cache:\n      enabled: false\n"
+    );
+    let (_, edge, _) = spawn_edge(&yaml).await;
+
+    for _ in 0..8 {
+        let (status, _) = get(edge, "/").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    assert_eq!(big.hits.load(Ordering::SeqCst), 6);
+    assert_eq!(small.hits.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn least_connections_avoids_the_busy_origin() {
+    let slow = spawn_backend("slow").await;
+    let quick = spawn_backend("quick").await;
+    slow.slow.store(400, Ordering::SeqCst);
+
+    let (_, edge, _) = spawn_edge(&zone_yaml(
+        &[slow.addr, quick.addr],
+        "      strategy: least_connections\n",
+    ))
+    .await;
+
+    /* the first request goes to the first origin - nothing is in flight yet, so there is
+       nothing to choose between them - and stays there for 400ms */
+    let busy = tokio::spawn(async move { get(edge, "/slow").await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    /* while it is out, the slow origin has one in flight and the quick one none */
+    let (status, who) = get(edge, "/").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(who, "quick", "a busy backend should not be handed more work");
+
+    let (status, who) = busy.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(who, "slow");
+
+    /* and once it is free again, it is a candidate like any other */
+    assert_eq!(slow.hits.load(Ordering::SeqCst), 1);
+    assert_eq!(quick.hits.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

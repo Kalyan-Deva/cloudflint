@@ -77,11 +77,17 @@ zones:
     #
     # origins:
     #   - url: "http://127.0.0.1:8081"
+    #     weight: 3          # only read by the `weighted` strategy
     #   - url: "http://127.0.0.1:8082"
     #
     # origin_policy:
     #   # first_healthy: earlier entries win, so this is primary-and-backups.
-    #   # round_robin: spread requests over everything healthy.
+    #   # round_robin: one each in turn.
+    #   # weighted: in proportion to the weights above, interleaved not in runs.
+    #   # least_connections: whichever has the fewest requests in flight.
+    #   #
+    #   # Whichever it is, only healthy origins take part - a backend that is out of
+    #   # rotation gets no turn and no share of the weights.
     #   strategy: first_healthy
     #   # Consecutive failures before a backend is taken out. One failed request is
     #   # usually the request's fault; taking a backend out on one turns a blip into
