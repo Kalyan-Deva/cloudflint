@@ -1,4 +1,4 @@
-//! Cache stage.
+﻿//! Cache stage.
 //!
 //! On a miss this stage goes to the origin itself rather than waving the request on,
 //! so the whole miss path - coalescing, storing, falling back to stale - lives in one
@@ -114,6 +114,7 @@ impl Cache {
                     pool: &ctx.zone.origins,
                     host: &ctx.host,
                     compression: &ctx.zone.compression,
+                    origin_tls: &ctx.zone.origin_tls,
                 },
                 ctx.peer,
                 ctx.tls,
@@ -224,6 +225,7 @@ impl Cache {
         let ttl_policy = ctx.zone.cache.clone();
         let zone = ctx.zone.name.clone();
         let compression = ctx.zone.compression.clone();
+        let origin_tls = ctx.zone.origin_tls.clone();
 
         tokio::spawn(async move {
             let _leader = leader;
@@ -234,6 +236,7 @@ impl Cache {
                         pool: &origins,
                         host: &host,
                         compression: &compression,
+                        origin_tls: &origin_tls,
                     },
                     peer,
                     tls,
@@ -326,4 +329,5 @@ fn gone() -> StageError {
         "500 request went missing before the cache could read it",
     )
 }
+
 

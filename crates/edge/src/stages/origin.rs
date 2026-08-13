@@ -1,11 +1,12 @@
-//! Talking to the origin.
+﻿//! Talking to the origin.
 //!
 //! `Fetcher` is the bit that does it, shared rather than owned by the stage, because
 //! the cache needs to make origin requests of its own for background revalidation.
 //! `Origin` is the terminal stage: it always answers, one way or another.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -20,10 +21,26 @@ use crate::body::{adapt, full, with_read_timeout, Body};
 use crate::compress;
 use crate::config;
 use crate::metrics::Metrics;
+use crate::origin_tls;
 use crate::origins::Health;
 use crate::pipeline::{Ctx, Stage, StageError, Verdict};
 
-pub type HttpClient = Client<HttpConnector, Body>;
+/// One connector for both schemes: `https_or_http` means a plaintext origin and a TLS one
+/// go through the same client, so there is no "which client is this" question per request.
+pub type HttpClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Body>;
+
+fn build_client(tls: rustls::ClientConfig) -> HttpClient {
+    let mut http = HttpConnector::new();
+    /* the connector would otherwise refuse an https uri outright */
+    http.enforce_http(false);
+    let connector = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_tls_config(tls)
+        .https_or_http()
+        .enable_http1()
+        .wrap_connector(http);
+
+    Client::builder(TokioExecutor::new()).build(connector)
+}
 
 /// Single-hop headers that must never be forwarded (RFC 9110 7.6.1).
 const HOP_BY_HOP: &[&str] = &[
@@ -47,10 +64,18 @@ pub struct Upstream<'a> {
     /// `preserve_host`.
     pub host: &'a str,
     pub compression: &'a compress::Policy,
+    /// Only consulted for `https://` origins.
+    pub origin_tls: &'a config::OriginTls,
 }
 
 pub struct Fetcher {
+    /// The default profile: public roots, verification on, no client certificate. Also
+    /// what every plaintext origin uses.
     client: HttpClient,
+    /// A client per distinct `origin_tls` profile, built the first time a zone needs it.
+    /// Keyed by the settings themselves, so zones asking for the same thing share a
+    /// connection pool.
+    profiles: RwLock<HashMap<String, HttpClient>>,
     /// Optional so a `Fetcher` can be built in a test without a registry.
     metrics: Option<Arc<Metrics>>,
     /// Also optional: with no registry there is nothing to fail over to either, since a
@@ -60,8 +85,18 @@ pub struct Fetcher {
 
 impl Fetcher {
     pub fn new() -> Self {
+        /* the crypto provider has to be installed before any rustls config is built;
+           main does it, but a test that only builds a Fetcher might not have */
+        crate::tls::install_crypto_provider();
+        let tls = origin_tls::client_config(&config::OriginTls {
+            verify: true,
+            ..Default::default()
+        })
+        .expect("the default origin tls profile needs nothing from disk");
+
         Self {
-            client: Client::builder(TokioExecutor::new()).build_http(),
+            client: build_client(tls),
+            profiles: RwLock::new(HashMap::new()),
             metrics: None,
             health: None,
         }
@@ -73,6 +108,39 @@ impl Fetcher {
             health: Some(health),
             ..Self::new()
         }
+    }
+
+    /// The client for a zone's TLS settings, built on first use.
+    fn client_for(&self, tls: &config::OriginTls) -> Result<HttpClient, StageError> {
+        if tls.is_default() {
+            return Ok(self.client.clone());
+        }
+        let key = tls.profile();
+
+        if let Some(found) = self
+            .profiles
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+        {
+            return Ok(found.clone());
+        }
+
+        let config = origin_tls::client_config(tls).map_err(|e| {
+            /* a bad path is a 502 rather than a panic, and says which zone setting is
+               wrong. `preflight` at startup means this should already have been caught */
+            warn!("origin tls profile could not be built: {e:#}");
+            StageError::new(
+                StatusCode::BAD_GATEWAY,
+                format!("502 origin tls is misconfigured: {e:#}"),
+            )
+        })?;
+
+        let mut profiles = self.profiles.write().unwrap_or_else(|e| e.into_inner());
+        Ok(profiles
+            .entry(key)
+            .or_insert_with(|| build_client(config))
+            .clone())
     }
 
     /// Every origin request goes through here - the cache's background revalidations as
@@ -95,7 +163,12 @@ impl Fetcher {
             pool,
             host,
             compression,
+            origin_tls,
         } = to;
+
+        /* once per request, not once per attempt: every origin in a pool shares the
+           zone's tls settings */
+        let client = self.client_for(origin_tls)?;
 
         let candidates = match &self.health {
             Some(health) => health.candidates(zone, pool),
@@ -128,7 +201,7 @@ impl Fetcher {
                return cannot leak a count and strand a backend at the bottom of the
                order forever */
             let counted = self.health.as_ref().map(|h| InFlight::new(h, zone, origin));
-            let out = self.send(origin, host, peer, tls, sending).await;
+            let out = self.send(&client, origin, host, peer, tls, sending).await;
             drop(counted);
             let kind = kind_of(&out);
 
@@ -197,14 +270,17 @@ impl Fetcher {
         origin: &config::Origin,
         host: &str,
         req: Request<Body>,
+        origin_tls: &config::OriginTls,
     ) -> Result<Response<Body>, StageError> {
         /* the probe is not forwarding anyone's request, so there is no peer to record */
         let nowhere: SocketAddr = ([127, 0, 0, 1], 0).into();
-        self.send(origin, host, nowhere, false, req).await
+        let client = self.client_for(origin_tls)?;
+        self.send(&client, origin, host, nowhere, false, req).await
     }
 
     async fn send(
         &self,
+        client: &HttpClient,
         origin: &config::Origin,
         host: &str,
         peer: SocketAddr,
@@ -247,7 +323,7 @@ impl Fetcher {
             parts.headers.remove(header::HOST);
         }
 
-        let sent = self.client.request(Request::from_parts(parts, body));
+        let sent = client.request(Request::from_parts(parts, body));
         match tokio::time::timeout(origin.timeout, sent).await {
             Ok(Ok(mut resp)) => {
                 if resp.status() == StatusCode::SWITCHING_PROTOCOLS {
@@ -402,6 +478,7 @@ impl Stage for Origin {
                     pool: &ctx.zone.origins,
                     host: &ctx.host,
                     compression: &ctx.zone.compression,
+                    origin_tls: &ctx.zone.origin_tls,
                 },
                 ctx.peer,
                 ctx.tls,
@@ -539,3 +616,4 @@ mod tests {
         assert_eq!(h.get("x-forwarded-for").unwrap(), "203.0.113.9");
     }
 }
+

@@ -28,6 +28,8 @@ async fn main() -> Result<()> {
     /* certificates load here rather than in the parser, so a bad path stops the
        edge starting instead of failing the first handshake of the day */
     let tls = Tls::new(&cfg)?.map(Arc::new);
+    /* and the same for the certificates we present *to* origins */
+    cloudveil_edge::origin_tls::preflight(&cfg)?;
 
     let listener = TcpListener::bind(listen)
         .await

@@ -354,6 +354,10 @@ pub fn spawn_probes(
                         origin: origin.clone(),
                         pool: zone.origins.clone(),
                         probe: probe.clone(),
+                        /* the same tls settings a real request would use: a probe that
+                           trusted more than the traffic does would report healthy for an
+                           origin the traffic cannot reach */
+                        origin_tls: zone.origin_tls.clone(),
                         host,
                         health: health.clone(),
                         fetcher: fetcher.clone(),
@@ -371,6 +375,7 @@ struct Probe {
     origin: Origin,
     pool: OriginPool,
     probe: crate::config::ProbeConfig,
+    origin_tls: crate::config::OriginTls,
     host: String,
     health: Arc<Health>,
     fetcher: Arc<Fetcher>,
@@ -427,7 +432,7 @@ impl Probe {
         };
         let resp = self
             .fetcher
-            .send_direct(&probing, &self.host, req)
+            .send_direct(&probing, &self.host, req, &self.origin_tls)
             .await
             .map_err(|e| e.detail)?;
 

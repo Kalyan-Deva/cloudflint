@@ -77,6 +77,8 @@ pub struct Zone {
     pub name: String,
     pub hostnames: Vec<String>, /* normalized, may start with "*." */
     pub origins: OriginPool,
+    /// How to talk TLS to this zone's origins. Only used for `https://` origins.
+    pub origin_tls: OriginTls,
     pub waf: WafPolicy,
     pub cache: CachePolicy,
     pub compression: CompressionPolicy,
@@ -154,6 +156,42 @@ impl Strategy {
             Strategy::Weighted => "weighted",
             Strategy::LeastConnections => "least_connections",
         }
+    }
+}
+
+/// What the edge does when it connects to an `https://` origin.
+///
+/// Paths rather than environment variables, matching the zone's own `tls` block: a path is
+/// not a secret, the file it points at is, and both have to exist on the node either way.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OriginTls {
+    /// An extra CA to trust, for an origin with an internal certificate.
+    pub ca: Option<PathBuf>,
+    /// A client certificate to present - mTLS to the origin.
+    pub client_cert: Option<PathBuf>,
+    pub client_key: Option<PathBuf>,
+    /// Check the origin's certificate. True unless somebody deliberately says otherwise.
+    pub verify: bool,
+}
+
+impl OriginTls {
+    /// Whether this is just "verify, public roots, no client certificate", which needs
+    /// nothing loaded and no profile of its own.
+    pub fn is_default(&self) -> bool {
+        self.verify && self.ca.is_none() && self.client_cert.is_none() && self.client_key.is_none()
+    }
+
+    /// Identifies a profile, so zones asking for the same thing share one client and its
+    /// connection pool.
+    pub fn profile(&self) -> String {
+        let path = |p: &Option<PathBuf>| p.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
+        format!(
+            "{}|{}|{}|{}",
+            self.verify,
+            path(&self.ca),
+            path(&self.client_cert),
+            path(&self.client_key)
+        )
     }
 }
 
@@ -236,6 +274,7 @@ pub fn parse(text: &str) -> Result<Config> {
         }
         zones.push(Zone {
             origins: pool_from(&z.name, z.origin, z.origins, z.origin_policy)?,
+            origin_tls: origin_tls_from(&z.name, z.origin_tls)?,
             waf: waf_from(&z.name, z.waf, &raw.lists)?,
             cache: cache_from(&z.name, z.cache)?,
             compression: compression_from(&z.name, z.compression)?,
@@ -446,6 +485,22 @@ fn origin_from(zone: &str, o: raw::Origin) -> Result<Origin> {
         preserve_host: o.preserve_host,
         timeout: Duration::from_millis(o.timeout_ms),
         weight: o.weight,
+    })
+}
+
+fn origin_tls_from(zone: &str, t: raw::OriginTls) -> Result<OriginTls> {
+    /* a certificate without its key would fail at handshake time, on a request, in
+       production. it is a typo, and a typo should not wait that long to be a problem */
+    match (&t.client_cert, &t.client_key) {
+        (Some(_), None) => bail!("zone `{zone}`: origin_tls.client_cert needs client_key too"),
+        (None, Some(_)) => bail!("zone `{zone}`: origin_tls.client_key needs client_cert too"),
+        _ => {}
+    }
+    Ok(OriginTls {
+        ca: t.ca.map(PathBuf::from),
+        client_cert: t.client_cert.map(PathBuf::from),
+        client_key: t.client_key.map(PathBuf::from),
+        verify: t.verify,
     })
 }
 
@@ -703,6 +758,8 @@ mod raw {
         #[serde(default)]
         pub origin_policy: Option<OriginPolicy>,
         #[serde(default)]
+        pub origin_tls: OriginTls,
+        #[serde(default)]
         pub waf: Waf,
         #[serde(default)]
         pub cache: Cache,
@@ -714,6 +771,31 @@ mod raw {
         pub adaptive: Adaptive,
         #[serde(default)]
         pub tls: Option<TlsPaths>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct OriginTls {
+        #[serde(default)]
+        pub ca: Option<String>,
+        #[serde(default)]
+        pub client_cert: Option<String>,
+        #[serde(default)]
+        pub client_key: Option<String>,
+        /// Deliberately defaults to true, and deliberately not global.
+        #[serde(default = "yes")]
+        pub verify: bool,
+    }
+
+    impl Default for OriginTls {
+        fn default() -> Self {
+            OriginTls {
+                ca: None,
+                client_cert: None,
+                client_key: None,
+                verify: true,
+            }
+        }
     }
 
     #[derive(Deserialize)]

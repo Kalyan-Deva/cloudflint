@@ -17,6 +17,8 @@ Two processes and a dashboard:
 
 - **TLS** termination with per-zone certificates selected by SNI, HTTP/2 via ALPN,
   hot certificate reload, and an optional HTTP→HTTPS redirect listener.
+- **HTTPS to the origin** with certificate validation on by default, per-zone trust for an
+  internal CA, and optional client certificates for origin mTLS.
 - **WAF** with an expression language, compiled to closures at config load. Two
   rulesets ship embedded: `core` (head-only) and `core-body` (opt-in).
 - **Cache** with request coalescing, stale-while-revalidate, stale-if-error, and purge
@@ -134,9 +136,15 @@ zones:
         every_secs: 10
         timeout_ms: 2000
         healthy_after: 2 # successes before it gets traffic again
-    tls:
+    tls: # this zone's certificate, for clients
       cert: "certs/demo.local.crt"
       key: "certs/demo.local.key"
+
+    origin_tls: # how we talk to an https:// origin
+      verify: true # on by default; false is per zone and logged every time
+      ca: "certs/internal-ca.pem" # an internal issuer, if the origin has one
+      client_cert: "certs/edge-client.crt" # mTLS to the origin
+      client_key: "certs/edge-client.key"
 
     waf:
       rulesets: [core] # add core-body to inspect request bodies
@@ -187,6 +195,21 @@ needs a restart.
 
 Exact hostnames beat wildcards: `*.demo.local` covers `api.demo.local` but not
 `demo.local` itself or `a.b.demo.local`.
+
+### HTTPS to the origin
+
+An `https://` origin url is reached over TLS with the certificate **verified** — public
+roots plus any `origin_tls.ca` a zone names, and the hostname has to match the url. A
+plaintext origin goes through the same client; the connector speaks either.
+
+`verify: false` exists for self-signed origins on private networks. It is per zone rather
+than global, so one internal service cannot quietly turn checking off for everything else,
+and it logs a warning every time the profile is built.
+
+`client_cert` / `client_key` present a client certificate, which is what lets an origin
+refuse everyone who is not this proxy. Clients are cached per distinct profile, so zones
+with the same settings share a connection pool. A path that does not exist stops the edge
+starting rather than failing the first request to that zone.
 
 ### Compression
 
