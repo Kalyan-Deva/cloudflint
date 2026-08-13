@@ -2,7 +2,7 @@
 //! tidies up whatever comes back, and records what happened.
 
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -14,7 +14,7 @@ use tracing::info;
 use crate::analytics::{now_ms, Event};
 use crate::body::{adapt, text, with_read_timeout, Body};
 use crate::config::Config;
-use crate::pipeline::Ctx;
+use crate::pipeline::{Caller, Ctx};
 use crate::stages::origin::strip_hop_by_hop;
 use crate::Edge;
 
@@ -26,6 +26,8 @@ struct Outcome {
     decided_by: &'static str,
     /// Empty when the request never matched a zone.
     zone: String,
+    /// The peer, unless a trusted proxy told us otherwise - see `client_ip`.
+    client: IpAddr,
 }
 
 pub async fn handle(
@@ -75,12 +77,18 @@ pub async fn handle(
         duration_us: took.as_micros() as u64,
         decided_by: outcome.decided_by.to_string(),
         cache,
-        client_ip: peer.ip().to_string(),
+        client_ip: outcome.client.to_string(),
     });
 
+    /* the client first, since that is the one somebody will search for; the peer only
+       when it is a different address, which is the sign a proxy is in front of us */
+    let via = match outcome.client == peer.ip() {
+        true => String::new(),
+        false => format!(" via {}", peer.ip()),
+    };
     info!(
-        "{peer} {method} {path} -> {status} [{}] in {took:?}",
-        outcome.decided_by
+        "{}{via} {method} {path} -> {status} [{}] in {took:?}",
+        outcome.client, outcome.decided_by
     );
     Ok(outcome.resp)
 }
@@ -103,11 +111,22 @@ async fn route(
     started: Instant,
     tls: bool,
 ) -> Outcome {
+    /* resolved once, before anything else, so every stage answers "who is this?" the
+       same way - and so a request that never finds a zone is still attributed to
+       somebody. Who to trust is node-wide config, not the zone's, so it is knowable
+       this early */
+    let client = cfg.client_ip.resolve(peer, req.headers());
+    /* and the same question about the scheme: our leg may be plaintext because
+       something in front terminated TLS, which is not the same as the client not
+       using it. `ssl` rules and the forwarded-proto we pass on both mean the client */
+    let tls = cfg.client_ip.resolve_tls(peer, req.headers(), tls);
+
     let Some(host) = host_of(&req) else {
         return Outcome {
             resp: text(StatusCode::BAD_REQUEST, "400 missing host"),
             decided_by: "route",
             zone: String::new(),
+            client,
         };
     };
     let Some(zone) = cfg.zone_for(&host) else {
@@ -115,6 +134,7 @@ async fn route(
             resp: text(StatusCode::NOT_FOUND, "404 no zone configured for this host"),
             decided_by: "route",
             zone: String::new(),
+            client,
         };
     };
 
@@ -124,13 +144,12 @@ async fn route(
     let body = with_read_timeout(adapt(body), edge.node.body_read_timeout);
 
     let mut ctx = Ctx::new(
-        peer,
+        Caller { peer, client, tls },
         host,
         cfg,
         zone,
         Request::from_parts(parts, body),
         started,
-        tls,
     );
     let resp = edge.pipeline.run(&mut ctx).await;
 
@@ -138,6 +157,7 @@ async fn route(
         resp,
         decided_by: ctx.decided_by,
         zone: zone.name.clone(),
+        client,
     }
 }
 

@@ -120,8 +120,9 @@ fn scan(
             "500 request went missing before the waf could read it",
         ));
     };
-    /* the peer address, never X-Forwarded-For - a client can write that itself */
-    let decoded = Decoded::new(req, &ctx.host, ctx.peer.ip(), ctx.tls);
+    /* ctx.client, which is the peer unless a *trusted* proxy said otherwise. Reading
+       X-Forwarded-For from anyone would let a client pick its own `ip.src` */
+    let decoded = Decoded::new(req, &ctx.host, ctx.client, ctx.tls);
     Ok(ctx.zone.waf.rules.evaluate(&decoded.input(body), phase, log))
 }
 
@@ -183,7 +184,7 @@ impl Waf {
                 "waf log {} severity={} {} {} {}",
                 hit.rule,
                 hit.severity,
-                ctx.peer.ip(),
+                ctx.client,
                 ctx.host,
                 ctx.req().map(|r| r.uri().path()).unwrap_or("-")
             );
@@ -196,7 +197,7 @@ impl Waf {
             "waf block {} severity={} {} {} {}",
             hit.rule,
             hit.severity,
-            ctx.peer.ip(),
+            ctx.client,
             ctx.host,
             ctx.req().map(|r| r.uri().path()).unwrap_or("-")
         );

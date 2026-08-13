@@ -58,7 +58,7 @@ impl Stage for RateLimit {
            zone is tightened right now, not how many times it has been */
         self.metrics.ratelimit_factor.set(&[&zone.name], factor);
 
-        let decoded = Decoded::new(req, &ctx.host, ctx.peer.ip(), ctx.tls);
+        let decoded = Decoded::new(req, &ctx.host, ctx.client, ctx.tls);
         let input = decoded.input("");
 
         for rule in &zone.rate_limits {
@@ -120,7 +120,9 @@ impl Stage for RateLimit {
 }
 
 fn subject_of(rule: &RateRule, ctx: &Ctx<'_>) -> Option<String> {
-    let ip = ctx.peer.ip();
+    /* the client, not the peer: behind a load balancer every request shares one peer,
+       and a per-ip limit keyed on that is one bucket for the whole internet */
+    let ip = ctx.client;
     match &rule.subject {
         Subject::Ip => Some(ip.to_string()),
         Subject::IpPath => {

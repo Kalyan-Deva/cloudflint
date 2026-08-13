@@ -6,6 +6,7 @@ pub mod analytics;
 pub mod auth;
 pub mod body;
 pub mod cache;
+pub mod client_ip;
 pub mod config;
 pub mod cp;
 pub mod limits;
@@ -157,7 +158,12 @@ async fn accept_loop(
         /* before a single byte of http - or of the handshake - is read. slowloris
            and friends never send a complete request, so anything that waits for one
            has already lost, and a tls handshake is far too expensive to hand out
-           for free */
+           for free.
+
+           necessarily the peer, not the client: there is no request yet to read a
+           forwarded-for header from. behind a proxy these caps therefore apply to the
+           proxy, which is the right answer for connections and the wrong one for
+           clients - that is what the per-client rate limits are for */
         let guard = match conns.admit(peer.ip()) {
             Ok(guard) => guard,
             Err(why) => {

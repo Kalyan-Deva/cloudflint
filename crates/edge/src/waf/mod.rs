@@ -8,7 +8,7 @@ pub mod ast;
 pub mod compile;
 pub mod parser;
 
-pub use compile::{decode, Input};
+pub use compile::{decode, Input, Net};
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};

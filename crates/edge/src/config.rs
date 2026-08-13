@@ -10,6 +10,7 @@ use hyper::http::uri::{Authority, Scheme};
 use hyper::Uri;
 
 use crate::cache::policy::{CachePolicy, PathOverride};
+use crate::client_ip::ClientIp;
 use crate::limits::health::Adaptive;
 use crate::limits::{RateRule, Subject};
 use crate::waf;
@@ -27,6 +28,9 @@ pub struct Config {
     pub control_plane: Option<String>,
     /// Where to serve purge and stats. None means no admin listener at all.
     pub admin_listen: Option<SocketAddr>,
+    /// How to work out who the client is when something sits in front of this node.
+    /// Node-wide: what is in front of a process cannot differ per hostname.
+    pub client_ip: ClientIp,
     /// None means plaintext only.
     pub tls: Option<TlsConfig>,
     pub zones: Vec<Zone>,
@@ -187,6 +191,8 @@ pub fn parse(text: &str) -> Result<Config> {
         },
         control_plane: raw.control_plane.map(|u| u.trim_end_matches('/').to_owned()),
         admin_listen: raw.admin_listen,
+        client_ip: ClientIp::new(&raw.client_ip.header, &raw.client_ip.trusted_proxies)
+            .context("client_ip")?,
         tls: raw.tls.map(|t| TlsConfig {
             listen: t.listen,
             handshake_timeout: Duration::from_millis(t.handshake_timeout_ms),
@@ -404,8 +410,29 @@ mod raw {
         #[serde(default)]
         pub admin_listen: Option<SocketAddr>,
         #[serde(default)]
+        pub client_ip: ClientIp,
+        #[serde(default)]
         pub tls: Option<Tls>,
         pub zones: Vec<Zone>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct ClientIp {
+        #[serde(default = "default_client_ip_header")]
+        pub header: String,
+        /// Empty - the default - means the header is never read. See `client_ip`.
+        #[serde(default)]
+        pub trusted_proxies: Vec<String>,
+    }
+
+    impl Default for ClientIp {
+        fn default() -> Self {
+            ClientIp {
+                header: default_client_ip_header(),
+                trusted_proxies: Vec::new(),
+            }
+        }
     }
 
     #[derive(Deserialize)]
@@ -695,6 +722,9 @@ mod raw {
     /// stuck client. Kubernetes' own default grace period is 30s.
     fn default_drain() -> u64 {
         30
+    }
+    fn default_client_ip_header() -> String {
+        crate::client_ip::DEFAULT_HEADER.to_string()
     }
     fn default_key() -> String {
         "ip".to_string()

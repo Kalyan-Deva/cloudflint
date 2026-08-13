@@ -147,14 +147,17 @@ fn ip_cmp(op: Op, operand: &Operand, lists: &Lists) -> Result<Pred> {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Net {
+/// An address or a CIDR range. Public because the client-ip resolver needs the same
+/// question answered - "is this address in one of these ranges?" - and two
+/// implementations of that would eventually disagree.
+#[derive(Clone, Copy, Debug)]
+pub struct Net {
     addr: IpAddr,
     prefix: u8,
 }
 
 impl Net {
-    fn parse(s: &str) -> Result<Net> {
+    pub fn parse(s: &str) -> Result<Net> {
         let (host, prefix) = match s.split_once('/') {
             None => (s, None),
             Some((h, p)) => (
@@ -176,7 +179,7 @@ impl Net {
         Ok(Net { addr, prefix })
     }
 
-    fn contains(&self, ip: IpAddr) -> bool {
+    pub fn contains(&self, ip: IpAddr) -> bool {
         match (self.addr, ip) {
             (IpAddr::V4(net), IpAddr::V4(a)) => v4_in(a, net, self.prefix),
             (IpAddr::V6(net), IpAddr::V6(a)) => v6_in(a, net, self.prefix),

@@ -5,7 +5,7 @@
 //! `Respond` and everything behind them never runs. The last stage in the list is
 //! expected to always answer - today that's the origin fetch.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -36,14 +36,31 @@ impl StageError {
     }
 }
 
+/// Who a request came from, and how. These three are worked out together in
+/// `proxy::route` and always travel together - splitting them across arguments is how
+/// you end up passing the peer where the client was meant.
+#[derive(Debug, Clone, Copy)]
+pub struct Caller {
+    pub peer: SocketAddr,
+    pub client: IpAddr,
+    /// Whether the *client* used https, not necessarily whether our own leg did.
+    pub tls: bool,
+}
+
 /// Everything a stage is allowed to see about the request in flight.
 pub struct Ctx<'a> {
+    /// Who opened the socket. The forwarding chain and the connection limits care about
+    /// this; nothing that identifies a *client* should.
     pub peer: SocketAddr,
+    /// Who the request is from, which is the peer unless a trusted proxy said otherwise.
+    /// Rate limits, `ip.src` rules and the log all key on this - see `client_ip`.
+    pub client: IpAddr,
     pub host: String,
     pub cfg: &'a Config,
     pub zone: &'a Zone,
     pub started: Instant,
-    /// Whether the client reached us over https.
+    /// Whether the client reached us over https - which behind a proxy that terminates
+    /// TLS is not the same as whether our own leg was encrypted.
     pub tls: bool,
     /// Set by the pipeline to whichever stage produced the response.
     pub decided_by: &'static str,
@@ -52,21 +69,21 @@ pub struct Ctx<'a> {
 
 impl<'a> Ctx<'a> {
     pub fn new(
-        peer: SocketAddr,
+        caller: Caller,
         host: String,
         cfg: &'a Config,
         zone: &'a Zone,
         req: Request<Body>,
         started: Instant,
-        tls: bool,
     ) -> Self {
         Self {
-            peer,
+            peer: caller.peer,
+            client: caller.client,
+            tls: caller.tls,
             host,
             cfg,
             zone,
             started,
-            tls,
             decided_by: "none",
             req: Some(req),
         }
@@ -238,13 +255,16 @@ zones:
         let zone = &cfg.zones[0];
         let req = Request::builder().uri("/").body(full("")).unwrap();
         let mut ctx = Ctx::new(
-            "127.0.0.1:1234".parse().unwrap(),
+            Caller {
+                peer: "127.0.0.1:1234".parse().unwrap(),
+                client: "127.0.0.1".parse().unwrap(),
+                tls: false,
+            },
             "demo.local".into(),
             &cfg,
             zone,
             req,
             Instant::now(),
-            false,
         );
         let resp = Pipeline::new(stages).run(&mut ctx).await;
         (resp, ctx.decided_by)

@@ -97,6 +97,10 @@ limits: # node-wide, applied at accept time
   max_connection_age_secs: 300
   drain_timeout_secs: 30
 
+client_ip: # who the client is when something sits in front of this node
+  header: x-forwarded-for
+  trusted_proxies: [] # empty (the default) means the header is never read
+
 lists:
   trusted: [127.0.0.1, 10.0.0.0/8]
 
@@ -154,6 +158,25 @@ needs a restart.
 
 Exact hostnames beat wildcards: `*.demo.local` covers `api.demo.local` but not
 `demo.local` itself or `a.b.demo.local`.
+
+### Behind a load balancer
+
+Rate limits, `ip.src` rules and the log all key on the client's address. By default that
+is the peer on the socket, which is correct when Cloudveil is the first thing traffic
+touches — and wrong behind a load balancer, where every client would share one bucket.
+
+Set `client_ip.trusted_proxies` to the addresses you actually run. The chain in
+`client_ip.header` is then read, but only from a peer on that list, and only the hops on
+it are believed: walking right to left, the first address that isn't a trusted proxy is
+the client. Anything a client wrote itself sits further left than the address its own
+proxy appended, so it is never reached.
+
+Only list ranges you control. Anything on the list can name any client it likes.
+
+A trusted proxy's `X-Forwarded-Proto` is honoured the same way, so `ssl` rules mean what
+the client did rather than what our own leg happened to be. Per-IP *connection* caps
+(`limits.max_connections_per_ip`) stay on the peer — they apply at accept time, before
+there is a request to read a header from.
 
 ### WAF expressions
 

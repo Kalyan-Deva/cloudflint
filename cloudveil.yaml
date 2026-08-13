@@ -36,6 +36,24 @@ limits:
   # this long. Kubernetes' own grace period is 30s, so match it or lower it.
   drain_timeout_secs: 30
 
+# Who the client is, when something sits in front of this node. Everything per-client
+# keys on this: rate limit buckets, ip.src rules, the live log.
+#
+# With no trusted_proxies - the default - the header is never read and the peer on the
+# socket is the client. That is right when Cloudveil is the first thing traffic touches,
+# and wrong the moment it is behind a load balancer, where every client collapses into
+# one rate limit bucket.
+#
+# Only list addresses you actually run. Anything on this list can name any client it
+# likes, so a range that is too wide hands strangers a way to pick their own identity
+# and walk past the limits they were caught by.
+client_ip:
+  # x-forwarded-for by default. Single-value headers work too: cf-connecting-ip,
+  # true-client-ip.
+  header: x-forwarded-for
+  trusted_proxies: []
+  # e.g. trusted_proxies: [10.0.0.0/8, 172.16.0.0/12]
+
 # Named lists the rules refer to as $name. Shared across zones.
 lists:
   trusted:
