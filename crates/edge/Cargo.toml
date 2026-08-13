@@ -23,6 +23,8 @@ async-trait.workspace = true
 arc-swap.workspace = true
 regex.workspace = true
 lru.workspace = true
+flate2.workspace = true
+brotli.workspace = true
 tokio-stream = { version = "0.1", features = ["sync"] }
 rustls.workspace = true
 tokio-rustls.workspace = true

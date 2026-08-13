@@ -132,6 +132,18 @@ zones:
           action: log
           severity: medium
 
+    # Brotli and gzip, on by default for text-ish types. This runs before the cache
+    # stores the response, so a cached variant is compressed once rather than on every
+    # hit - the cache key already folds accept-encoding down to one token.
+    compression:
+      enabled: true
+      min_bytes: 1024
+      # Compressing buffers the body, so this is also the most memory one response can
+      # cost. Anything bigger streams through untouched.
+      max_bytes: 1048576
+      # Defaults to a built-in list of text/*, json, xml, svg, wasm and fonts.
+      # types: [text/html, application/json]
+
     # Also optional. On by default, but with no default ttl, so nothing is held
     # unless the origin asks for it or an override below says so.
     cache:

@@ -24,6 +24,8 @@ Two processes and a dashboard:
   is failing.
 - **Origin failover** across a pool of backends, with passive health from real traffic
   and optional active probes.
+- **Compression** with brotli and gzip, applied before the cache so each variant is
+  compressed once rather than on every hit.
 - **WebSockets** and other `Upgrade` connections pass through.
 - **Control plane** holding config as revisions with one-click rollback, plus
   analytics ingested from the edges.
@@ -142,6 +144,12 @@ zones:
           expression: http.request.uri.path contains "/admin" and not ssl
           action: block # block | log | skip
 
+    compression: # on by default
+      enabled: true
+      min_bytes: 1024 # below this the headers cost more than the saving
+      max_bytes: 1048576 # above this it streams through uncompressed
+      # types: [text/html, application/json] # defaults to the built-in text-ish list
+
     cache:
       enabled: true
       vary_on: [accept-encoding]
@@ -176,6 +184,23 @@ needs a restart.
 
 Exact hostnames beat wildcards: `*.demo.local` covers `api.demo.local` but not
 `demo.local` itself or `a.b.demo.local`.
+
+### Compression
+
+Brotli and gzip, on by default for text-ish content types above `min_bytes`. Brotli wins
+when a client offers both, at quality 4 rather than 11 — compressing on the fly costs a
+person's time, and 11 is roughly an order of magnitude slower for a few percent.
+
+It runs on the response as it arrives from the origin, **before the cache stores it**, so
+a cached variant is compressed once however many times it is served. The cache key already
+folds `Accept-Encoding` down to one token, so a brotli client and a gzip client get
+separate entries — and the code that picks an encoding is the same code that builds that
+part of the key, because if they disagreed a client could be handed bytes it cannot read.
+
+Never touched: anything already carrying `Content-Encoding`, `Cache-Control:
+no-transform`, `206 Partial Content`, a type not on the list, or a response with no
+`Content-Type` at all. Bodies over `max_bytes` stream through uncompressed; streaming
+compression is a deferral, not a feature.
 
 ### Origins and failover
 
@@ -319,6 +344,8 @@ From the edge:
 | `cloudveil_origin_healthy` | gauge | `zone`, `origin` — 0 while taken out of rotation |
 | `cloudveil_origin_failovers_total` | counter | `zone` |
 | `cloudveil_origin_probes_total` | counter | `zone`, `origin`, `result` |
+| `cloudveil_compressed_total` | counter | `zone`, `coding` |
+| `cloudveil_compressed_bytes_in_total` / `_out_total` | counter | `zone` — the difference is the saving |
 | `cloudveil_connections_total` | counter | |
 | `cloudveil_connections_refused_total` | counter | `reason` (`too_many`/`too_fast`) |
 | `cloudveil_connections_active` | gauge | |

@@ -19,7 +19,7 @@ use crate::cache::policy::{self, CachePolicy};
 use crate::cache::tee::tee;
 use crate::cache::{Entry, Freshness, Key, Store};
 use crate::pipeline::{Ctx, Stage, StageError, Verdict};
-use crate::stages::origin::Fetcher;
+use crate::stages::origin::{Fetcher, Upstream};
 
 /// Header we report the cache decision in. Handy in a browser, and the integration
 /// tests lean on it heavily.
@@ -109,9 +109,12 @@ impl Cache {
         let fetched = self
             .fetcher
             .fetch(
-                &ctx.zone.name,
-                &ctx.zone.origins,
-                &ctx.host,
+                Upstream {
+                    zone: &ctx.zone.name,
+                    pool: &ctx.zone.origins,
+                    host: &ctx.host,
+                    compression: &ctx.zone.compression,
+                },
                 ctx.peer,
                 ctx.tls,
                 req,
@@ -220,10 +223,24 @@ impl Cache {
         let path = key.path.clone();
         let ttl_policy = ctx.zone.cache.clone();
         let zone = ctx.zone.name.clone();
+        let compression = ctx.zone.compression.clone();
 
         tokio::spawn(async move {
             let _leader = leader;
-            let resp = match fetcher.fetch(&zone, &origins, &host, peer, tls, replay).await {
+            let resp = match fetcher
+                .fetch(
+                    Upstream {
+                        zone: &zone,
+                        pool: &origins,
+                        host: &host,
+                        compression: &compression,
+                    },
+                    peer,
+                    tls,
+                    replay,
+                )
+                .await
+            {
                 Ok(resp) => resp,
                 Err(e) => {
                     warn!("{host} {path}: background revalidation failed: {}", e.detail);

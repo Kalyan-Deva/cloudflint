@@ -11,6 +11,7 @@ use hyper::Uri;
 
 use crate::cache::policy::{CachePolicy, PathOverride};
 use crate::client_ip::ClientIp;
+use crate::compress::Policy as CompressionPolicy;
 use crate::limits::health::Adaptive;
 use crate::limits::{RateRule, Subject};
 use crate::waf;
@@ -78,6 +79,7 @@ pub struct Zone {
     pub origins: OriginPool,
     pub waf: WafPolicy,
     pub cache: CachePolicy,
+    pub compression: CompressionPolicy,
     pub rate_limits: Vec<RateRule>,
     pub adaptive: Adaptive,
     pub tls: Option<TlsPaths>,
@@ -214,6 +216,7 @@ pub fn parse(text: &str) -> Result<Config> {
             origins: pool_from(&z.name, z.origin, z.origins, z.origin_policy)?,
             waf: waf_from(&z.name, z.waf, &raw.lists)?,
             cache: cache_from(&z.name, z.cache)?,
+            compression: compression_from(&z.name, z.compression)?,
             rate_limits: rate_limits_from(&z.name, z.rate_limits, &raw.lists)?,
             adaptive: adaptive_from(&z.name, z.adaptive)?,
             tls: z.tls.map(|t| TlsPaths {
@@ -416,6 +419,23 @@ fn origin_from(zone: &str, o: raw::Origin) -> Result<Origin> {
         authority,
         preserve_host: o.preserve_host,
         timeout: Duration::from_millis(o.timeout_ms),
+    })
+}
+
+fn compression_from(zone: &str, c: raw::Compression) -> Result<CompressionPolicy> {
+    if c.max_bytes < c.min_bytes {
+        bail!("zone `{zone}`: compression.max_bytes is below min_bytes, so nothing would ever compress");
+    }
+    Ok(CompressionPolicy {
+        enabled: c.enabled,
+        min_bytes: c.min_bytes,
+        max_bytes: c.max_bytes,
+        types: c
+            .types
+            .unwrap_or_else(crate::compress::default_types)
+            .iter()
+            .map(|t| t.trim().to_ascii_lowercase())
+            .collect(),
     })
 }
 
@@ -652,11 +672,38 @@ mod raw {
         #[serde(default)]
         pub cache: Cache,
         #[serde(default)]
+        pub compression: Compression,
+        #[serde(default)]
         pub rate_limits: Vec<RateLimit>,
         #[serde(default)]
         pub adaptive: Adaptive,
         #[serde(default)]
         pub tls: Option<TlsPaths>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Compression {
+        #[serde(default = "yes")]
+        pub enabled: bool,
+        #[serde(default = "default_min_compress")]
+        pub min_bytes: usize,
+        #[serde(default = "default_max_compress")]
+        pub max_bytes: usize,
+        /// Absent means the built-in list of text-ish types.
+        #[serde(default)]
+        pub types: Option<Vec<String>>,
+    }
+
+    impl Default for Compression {
+        fn default() -> Self {
+            Compression {
+                enabled: true,
+                min_bytes: default_min_compress(),
+                max_bytes: default_max_compress(),
+                types: None,
+            }
+        }
     }
 
     #[derive(Deserialize)]
@@ -906,6 +953,15 @@ mod raw {
     }
     fn default_strategy() -> String {
         "first_healthy".to_string()
+    }
+    /// Under a kilobyte the headers cost more than the saving.
+    fn default_min_compress() -> usize {
+        1024
+    }
+    /// Compressing buffers the body, so this is also the most memory one response can
+    /// cost. Anything larger streams through untouched.
+    fn default_max_compress() -> usize {
+        1024 * 1024
     }
     /// Three, not one: a single failed request is usually the request's fault, and
     /// taking a backend out on one is how a blip becomes an outage.

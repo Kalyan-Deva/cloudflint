@@ -17,6 +17,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use tracing::{debug, warn};
 
 use crate::body::{adapt, full, with_read_timeout, Body};
+use crate::compress;
 use crate::config;
 use crate::metrics::Metrics;
 use crate::origins::Health;
@@ -35,6 +36,18 @@ const HOP_BY_HOP: &[&str] = &[
     "transfer-encoding",
     "upgrade",
 ];
+
+/// Where a request is going, and what to do with what comes back. These four are read
+/// off one zone and are always used together; as loose arguments they were four chances
+/// to pass a zone's name with another zone's pool.
+pub struct Upstream<'a> {
+    pub zone: &'a str,
+    pub pool: &'a config::OriginPool,
+    /// The Host the client asked for, which the origin may or may not see - see
+    /// `preserve_host`.
+    pub host: &'a str,
+    pub compression: &'a compress::Policy,
+}
 
 pub struct Fetcher {
     client: HttpClient,
@@ -72,13 +85,18 @@ impl Fetcher {
     /// to wait for a second one.
     pub async fn fetch(
         &self,
-        zone: &str,
-        pool: &config::OriginPool,
-        host: &str,
+        to: Upstream<'_>,
         peer: SocketAddr,
         tls: bool,
         req: Request<Body>,
     ) -> Result<Response<Body>, StageError> {
+        let Upstream {
+            zone,
+            pool,
+            host,
+            compression,
+        } = to;
+
         let candidates = match &self.health {
             Some(health) => health.candidates(zone, pool),
             None => (0..pool.origins.len()).collect(),
@@ -86,6 +104,13 @@ impl Fetcher {
 
         /* captured before the first attempt, because sending consumes the request */
         let replay = replayable(&req);
+        /* likewise: the request is gone by the time there is a response to compress */
+        let accept = req
+            .headers()
+            .get(hyper::header::ACCEPT_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
         let mut req = Some(req);
         let mut last: Option<StageError> = None;
 
@@ -119,7 +144,16 @@ impl Fetcher {
             }
 
             match out {
-                Ok(resp) => return Ok(resp),
+                Ok(resp) => {
+                    /* here rather than on the way out to the client: the cache stores
+                       what this returns, so each variant is compressed once however
+                       often it is served. See `compress` */
+                    let (resp, saved) = compress::apply(&accept, resp, compression).await;
+                    if let (Some(metrics), Some(saved)) = (&self.metrics, saved) {
+                        metrics.compressed(zone, saved.coding.as_str(), saved.before, saved.after);
+                    }
+                    return Ok(resp);
+                }
                 Err(e) => {
                     /* a timeout is terminal: see the note above */
                     if kind != Some("unreachable") {
@@ -323,9 +357,12 @@ impl Stage for Origin {
         let resp = self
             .fetcher
             .fetch(
-                &ctx.zone.name,
-                &ctx.zone.origins,
-                &ctx.host,
+                Upstream {
+                    zone: &ctx.zone.name,
+                    pool: &ctx.zone.origins,
+                    host: &ctx.host,
+                    compression: &ctx.zone.compression,
+                },
                 ctx.peer,
                 ctx.tls,
                 req,

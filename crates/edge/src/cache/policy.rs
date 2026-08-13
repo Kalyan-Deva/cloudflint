@@ -115,21 +115,15 @@ fn vary_key(headers: &HeaderMap, policy: &CachePolicy) -> String {
 
 /// `gzip, deflate, br` and `br;q=1.0, gzip` want the same cached object. Without
 /// this every browser's exact header spelling gets its own copy.
+///
+/// For accept-encoding this is deliberately the *same* function the compressor picks
+/// with: entries are compressed before they are stored, so a key that disagreed with
+/// the chosen encoding would serve one client another's bytes.
 fn normalize_vary(name: &str, value: &str) -> String {
     if name != "accept-encoding" {
         return value.trim().to_ascii_lowercase();
     }
-    let offered: Vec<&str> = value
-        .split(',')
-        .map(|t| t.split(';').next().unwrap_or("").trim())
-        .collect();
-
-    for best in ["br", "gzip", "deflate"] {
-        if offered.iter().any(|t| t.eq_ignore_ascii_case(best)) {
-            return best.to_string();
-        }
-    }
-    "identity".to_string()
+    crate::compress::preferred(value).as_str().to_string()
 }
 
 /// How long this response may be held, or None to not hold it at all.

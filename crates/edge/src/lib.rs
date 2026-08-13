@@ -1,4 +1,4 @@
-//! Cloudveil edge - the data plane. Everything in here sits in the request path,
+﻿//! Cloudveil edge - the data plane. Everything in here sits in the request path,
 //! so it stays free of database calls and blocking work.
 
 pub mod admin;
@@ -7,6 +7,7 @@ pub mod auth;
 pub mod body;
 pub mod cache;
 pub mod client_ip;
+pub mod compress;
 pub mod config;
 pub mod cp;
 pub mod limits;
@@ -340,3 +341,5 @@ fn path_of(req: &hyper::Request<hyper::body::Incoming>) -> String {
 
 /// Response bodies from the redirect listener share the edge's body type.
 pub type RedirectBody = Body;
+
+

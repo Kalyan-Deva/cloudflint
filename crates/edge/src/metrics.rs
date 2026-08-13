@@ -344,6 +344,9 @@ pub struct Metrics {
     pub origin_healthy: Gauges,
     pub origin_failovers: Counter,
     pub origin_probes: Counter,
+    pub compressed: Counter,
+    pub compressed_bytes_in: Counter,
+    pub compressed_bytes_out: Counter,
     pub connections: Counter,
     pub connections_refused: Counter,
     pub connections_active: Gauges,
@@ -420,6 +423,21 @@ impl Metrics {
                 "cloudveil_origin_probes_total",
                 "Health probes sent, by result.",
                 &["zone", "origin", "result"],
+            ),
+            compressed: Counter::new(
+                "cloudveil_compressed_total",
+                "Responses compressed, by coding.",
+                &["zone", "coding"],
+            ),
+            compressed_bytes_in: Counter::new(
+                "cloudveil_compressed_bytes_in_total",
+                "Body bytes fed to the compressor.",
+                &["zone"],
+            ),
+            compressed_bytes_out: Counter::new(
+                "cloudveil_compressed_bytes_out_total",
+                "Body bytes it produced. The difference is the bandwidth saved.",
+                &["zone"],
             ),
             connections: Counter::new(
                 "cloudveil_connections_total",
@@ -507,6 +525,13 @@ impl Metrics {
         self.origin_probes.inc(&[zone_label(zone), origin, result]);
     }
 
+    pub fn compressed(&self, zone: &str, coding: &str, before: usize, after: usize) {
+        let zone = zone_label(zone);
+        self.compressed.inc(&[zone, coding]);
+        self.compressed_bytes_in.add(&[zone], before as u64);
+        self.compressed_bytes_out.add(&[zone], after as u64);
+    }
+
     pub fn connection_opened(&self) {
         self.connections.inc(&[]);
         self.connections_active.add(&[], 1.0);
@@ -531,6 +556,9 @@ impl Metrics {
             + self.origin_healthy.dropped()
             + self.origin_failovers.dropped()
             + self.origin_probes.dropped()
+            + self.compressed.dropped()
+            + self.compressed_bytes_in.dropped()
+            + self.compressed_bytes_out.dropped()
             + self.connections.dropped()
             + self.connections_refused.dropped()
             + self.connections_active.dropped()
@@ -553,6 +581,9 @@ impl Metrics {
         self.origin_healthy.render_into(&mut out);
         self.origin_failovers.render_into(&mut out);
         self.origin_probes.render_into(&mut out);
+        self.compressed.render_into(&mut out);
+        self.compressed_bytes_in.render_into(&mut out);
+        self.compressed_bytes_out.render_into(&mut out);
         self.connections.render_into(&mut out);
         self.connections_refused.render_into(&mut out);
         self.connections_active.render_into(&mut out);
