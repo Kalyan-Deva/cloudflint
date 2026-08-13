@@ -1,0 +1,44 @@
+# Edge config for docker compose. Plaintext only - TLS wants certificates, and which
+# ones is a decision for wherever this actually runs.
+#
+# Note the addresses: 0.0.0.0 inside a container, because the interface a request
+# arrives on is the container's, not the host's. What is exposed is compose's job.
+
+listen: "0.0.0.0:8080"
+admin_listen: "0.0.0.0:9001"
+control_plane: "http://api:9000"
+
+cache:
+  max_bytes: 268435456
+  max_object_bytes: 8388608
+
+limits:
+  # under the compose stop_grace_period, so the drain finishes on its own terms rather
+  # than being cut short by the runtime
+  drain_timeout_secs: 30
+
+zones:
+  - name: demo
+    hostnames:
+      - localhost
+      - demo.local
+    origin:
+      url: "http://origin:80"
+      preserve_host: true
+
+    waf:
+      rulesets: [core]
+
+    cache:
+      enabled: true
+      overrides:
+        - path_prefix: "/static/"
+          ttl_secs: 604800
+          override_origin_headers: true
+
+    rate_limits:
+      - id: per-ip
+        key: ip
+        requests: 300
+        window_secs: 60
+        action: block

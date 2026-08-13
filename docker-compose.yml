@@ -1,0 +1,67 @@
+﻿# The whole thing running: control plane, edge, and an origin to put behind it.
+#
+#   CLOUDVEIL_API_TOKEN=cv_... CLOUDVEIL_ADMIN_TOKEN=cv_... docker compose up
+#
+# Mint tokens with `openssl rand -hex 32` and prefix them `cv_`. Nothing here has a
+# default: a compose file with a token in it is a token in your shell history.
+
+services:
+  api:
+    build: .
+    command: ["cloudveil-api", "0.0.0.0:9000", "/var/lib/cloudveil/cloudveil.db", "http://edge:9001"]
+    environment:
+      # the bootstrap token, stored hashed on first start
+      CLOUDVEIL_API_TOKEN: "${CLOUDVEIL_API_TOKEN:?mint one - openssl rand -hex 32}"
+      # what this process presents to the edge's admin api when fanning out a purge
+      CLOUDVEIL_EDGE_TOKEN: "${CLOUDVEIL_ADMIN_TOKEN:?mint one - openssl rand -hex 32}"
+      CLOUDVEIL_LOG_FORMAT: json
+    volumes:
+      - api-data:/var/lib/cloudveil
+    ports:
+      - "127.0.0.1:9000:9000"
+    healthcheck:
+      # /health is the one endpoint that needs no token. bash's /dev/tcp rather than
+      # curl, so the runtime image stays free of a http client it would otherwise only
+      # have for this
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9000; printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3; grep -q '200 OK' <&3"]
+      interval: 10s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+
+  edge:
+    build: .
+    command: ["cloudveil-edge", "/etc/cloudveil/cloudveil.yaml"]
+    environment:
+      CLOUDVEIL_ADMIN_TOKEN: "${CLOUDVEIL_ADMIN_TOKEN:?mint one - openssl rand -hex 32}"
+      # the edge pulls config from the control plane and ships analytics back
+      CLOUDVEIL_CP_TOKEN: "${CLOUDVEIL_API_TOKEN:?mint one - openssl rand -hex 32}"
+      CLOUDVEIL_LOG_FORMAT: json
+    volumes:
+      - ./deploy/edge.yaml:/etc/cloudveil/cloudveil.yaml:ro
+    ports:
+      - "8080:8080"
+      # admin stays on loopback: it is purge, stats and a scrape of your traffic shape
+      - "127.0.0.1:9001:9001"
+    depends_on:
+      - api
+    healthcheck:
+      # /admin/health needs no token either, and it answers 503 while draining - so a
+      # container that is shutting down reads as unhealthy, which is the truth
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9001; printf 'GET /admin/health HTTP/1.0\\r\\n\\r\\n' >&3; grep -q '200 OK' <&3"]
+      interval: 10s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+    # room for the drain to finish before the runtime loses patience; the edge's own
+    # limits.drain_timeout_secs should be lower than this
+    stop_grace_period: 40s
+
+  # something to put behind the proxy. Any origin will do; this one is just a page.
+  origin:
+    image: nginx:alpine
+    expose:
+      - "80"
+
+volumes:
+  api-data:

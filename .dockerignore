@@ -1,0 +1,11 @@
+# Keep the build context to what the build actually needs: sources, manifests and the
+# rulesets that get embedded. Everything else is either huge or host-specific.
+target/
+dashboard/
+docs/
+.git/
+*.db
+*.pem
+*.key
+certs/
+cloudveil.local.yaml

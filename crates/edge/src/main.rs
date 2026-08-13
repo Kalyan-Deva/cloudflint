@@ -53,6 +53,10 @@ async fn main() -> Result<()> {
     let edge = Edge::with_tls(snap.clone(), tls.clone());
     info!("pipeline: {}", edge.stage_names().join(" -> "));
 
+    /* before any listener is up, so a signal arriving during startup is still heard */
+    edge.shutdown.listen();
+    let drain_timeout = edge.node_limits().drain_timeout;
+
     match &control_plane {
         Some(url) => {
             info!("control plane at {url} - pulling config and shipping analytics there");
@@ -74,6 +78,11 @@ async fn main() -> Result<()> {
         });
     }
 
+    /* the plaintext listener either serves traffic or redirects to https, and which
+       one is only known further down - an Option so the compiler can see it is used
+       exactly once either way */
+    let mut plaintext = Some(listener);
+
     /* https last, so the watcher and the admin api are already up either way */
     if let (Some(tls_cfg), Some(_)) = (&tls_cfg, &tls) {
         let https = TcpListener::bind(tls_cfg.listen)
@@ -92,9 +101,30 @@ async fn main() -> Result<()> {
 
         if tls_cfg.redirect_http {
             info!("plaintext on {listen} redirects to https");
-            return serve_redirect(listener, tls_cfg.listen.port()).await;
+            let listener = plaintext.take().expect("the plaintext listener is still here");
+            let port = tls_cfg.listen.port();
+            let shutdown = edge.shutdown.clone();
+            tokio::spawn(async move {
+                if let Err(e) = serve_redirect(listener, port, shutdown).await {
+                    tracing::error!("redirect listener stopped: {e}");
+                }
+            });
         }
     }
 
-    serve(listener, edge).await
+    if let Some(listener) = plaintext {
+        let edge = edge.clone();
+        tokio::spawn(async move {
+            if let Err(e) = serve(listener, edge).await {
+                tracing::error!("listener stopped: {e}");
+            }
+        });
+    }
+
+    /* every listener runs in its own task now, so this is where the process waits -
+       and where a shutdown is sequenced: signal, stop accepting, drain, exit */
+    edge.shutdown.signalled().await;
+    edge.shutdown.drain(drain_timeout).await;
+    info!("goodbye");
+    Ok(())
 }

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use cloudveil_api::db::Db;
 use cloudveil_api::{router, Api};
+use cloudveil_edge::shutdown::Shutdown;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
@@ -18,6 +19,9 @@ const TLS_KEY_VAR: &str = "CLOUDVEIL_API_TLS_KEY";
 const CLIENT_CA_VAR: &str = "CLOUDVEIL_API_CLIENT_CA";
 /// The token this process presents to the edges' admin APIs when purging.
 const EDGE_TOKEN_VAR: &str = "CLOUDVEIL_EDGE_TOKEN";
+/// Not configurable: nothing here is worth waiting on for long. A config write either
+/// finished or it didn't, and the client will find out which.
+const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Usage: cloudveil-api [listen] [db path] [edge admin url, ...]
 #[tokio::main]
@@ -50,14 +54,24 @@ async fn main() -> Result<()> {
         _ => info!("purging to: {}", edges.join(", ")),
     }
 
+    /* the control plane is not in anyone's request path, so its shutdown is the simple
+       kind: stop accepting, let whatever is in flight finish, go. Nothing is draining
+       towards it and nothing downstream depends on it staying up. */
+    let shutdown = Shutdown::new();
+    shutdown.listen();
+
     match acceptor()? {
         Some(acceptor) => {
             info!("serving https");
-            serve_tls(listener, router(api), acceptor).await
+            serve_tls(listener, router(api), acceptor, shutdown).await
         }
         None => {
             warn!("serving plaintext - set {TLS_CERT_VAR} and {TLS_KEY_VAR} for https");
-            axum::serve(listener, router(api)).await?;
+            let stopping = shutdown.clone();
+            axum::serve(listener, router(api))
+                .with_graceful_shutdown(async move { stopping.signalled().await })
+                .await?;
+            info!("goodbye");
             Ok(())
         }
     }
@@ -122,15 +136,27 @@ fn acceptor() -> Result<Option<TlsAcceptor>> {
     Ok(Some(TlsAcceptor::from(Arc::new(config))))
 }
 
-async fn serve_tls(listener: TcpListener, app: axum::Router, acceptor: TlsAcceptor) -> Result<()> {
+async fn serve_tls(
+    listener: TcpListener,
+    app: axum::Router,
+    acceptor: TlsAcceptor,
+    shutdown: Arc<Shutdown>,
+) -> Result<()> {
     loop {
-        let Ok((stream, peer)) = listener.accept().await else {
+        let accepted = tokio::select! {
+            biased;
+            _ = shutdown.signalled() => break,
+            accepted = listener.accept() => accepted,
+        };
+        let Ok((stream, peer)) = accepted else {
             continue;
         };
         let acceptor = acceptor.clone();
         let app = app.clone();
+        let token = shutdown.token();
 
         tokio::spawn(async move {
+            let _token = token;
             let stream = match acceptor.accept(stream).await {
                 Ok(stream) => stream,
                 /* the usual cause is a client with no certificate, or the wrong one */
@@ -145,4 +171,8 @@ async fn serve_tls(listener: TcpListener, app: axum::Router, acceptor: TlsAccept
             }
         });
     }
+
+    shutdown.drain(DRAIN_TIMEOUT).await;
+    info!("goodbye");
+    Ok(())
 }

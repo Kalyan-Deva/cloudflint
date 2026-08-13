@@ -14,6 +14,7 @@ pub mod metrics;
 pub mod pages;
 pub mod pipeline;
 pub mod proxy;
+pub mod shutdown;
 pub mod snapshot;
 pub mod stages;
 pub mod tls;
@@ -38,6 +39,7 @@ use crate::config::NodeLimits;
 use crate::limits::conn::ConnLimits;
 use crate::metrics::Metrics;
 use crate::pipeline::Pipeline;
+use crate::shutdown::Shutdown;
 use crate::snapshot::Snapshot;
 use crate::tls::Tls;
 
@@ -52,6 +54,7 @@ pub struct Edge {
     pub store: Arc<Store>,
     pub analytics: Arc<analytics::Sink>,
     pub metrics: Arc<Metrics>,
+    pub shutdown: Arc<Shutdown>,
     pub tls: Option<Arc<Tls>>,
     pipeline: Arc<Pipeline>,
     node: NodeLimits,
@@ -78,6 +81,7 @@ impl Edge {
             store,
             analytics,
             metrics,
+            shutdown: Shutdown::new(),
             tls,
             pipeline,
             node,
@@ -86,6 +90,10 @@ impl Edge {
 
     pub fn stage_names(&self) -> Vec<&'static str> {
         self.pipeline.stage_names()
+    }
+
+    pub fn node_limits(&self) -> NodeLimits {
+        self.node
     }
 }
 
@@ -124,7 +132,19 @@ async fn accept_loop(
         .unwrap_or(Duration::from_secs(10));
 
     loop {
-        let (stream, peer) = match listener.accept().await {
+        let accepted = tokio::select! {
+            /* biased so a signal that lands at the same moment as a connection wins:
+               accepting one more request while draining is exactly what we said we
+               would stop doing */
+            biased;
+            _ = edge.shutdown.signalled() => {
+                debug!("draining - closing the listener");
+                return Ok(());
+            }
+            accepted = listener.accept() => accepted,
+        };
+
+        let (stream, peer) = match accepted {
             Ok(v) => v,
             Err(e) => {
                 /* usually fd exhaustion - back off so we don't spin the cpu */
@@ -149,8 +169,11 @@ async fn accept_loop(
 
         let edge = edge.clone();
         let acceptor = acceptor.clone();
+        /* held until this connection is finished with, so a drain knows to wait */
+        let token = edge.shutdown.token();
         tokio::spawn(async move {
             let _guard = guard;
+            let _token = token;
             let metrics = edge.metrics.clone();
 
             match acceptor {
@@ -182,6 +205,7 @@ async fn run<I>(io: TokioIo<I>, edge: Arc<Edge>, peer: std::net::SocketAddr, nod
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let shutdown = edge.shutdown.clone();
     let svc = service_fn(move |req| proxy::handle(req, edge.clone(), peer, tls));
 
     let mut builder = auto::Builder::new(TokioExecutor::new());
@@ -195,13 +219,39 @@ where
 
     /* with_upgrades, or a websocket 101 would be answered and then abandoned */
     let conn = builder.serve_connection_with_upgrades(io, svc);
+    /* pinned because a graceful shutdown has to be asked of a connection that is
+       already being polled - it is a message to it, not a way of dropping it */
+    let mut conn = std::pin::pin!(conn);
 
     /* an upper bound on any one connection, so a slow request can't hold a slot
        indefinitely even if it keeps dribbling bytes to stay alive */
-    match tokio::time::timeout(node.max_connection_age, conn).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => debug!("{peer}: connection closed: {e}"),
-        Err(_) => debug!("{peer}: closed after {:?}", node.max_connection_age),
+    let age = tokio::time::sleep(node.max_connection_age);
+    let mut age = std::pin::pin!(age);
+
+    /* asked once and only once - `signalled` stays ready forever afterwards, so an
+       unguarded arm would spin */
+    let mut asked = false;
+    loop {
+        tokio::select! {
+            done = conn.as_mut() => {
+                if let Err(e) = done {
+                    debug!("{peer}: connection closed: {e}");
+                }
+                return;
+            }
+            _ = &mut age => {
+                debug!("{peer}: closed after {:?}", node.max_connection_age);
+                return;
+            }
+            _ = shutdown.signalled(), if !asked => {
+                asked = true;
+                /* finish the response in flight and then close: http/1.1 stops
+                   keeping alive, http/2 gets a GOAWAY. the loop goes round once
+                   more to poll the connection out */
+                debug!("{peer}: draining");
+                conn.as_mut().graceful_shutdown();
+            }
+        }
     }
 }
 
@@ -209,14 +259,25 @@ where
 ///
 /// Deliberately not part of the pipeline: it answers before routing, so it works for
 /// hostnames this node doesn't even serve, and there is nothing here worth a WAF.
-pub async fn serve_redirect(listener: TcpListener, https_port: u16) -> Result<()> {
+pub async fn serve_redirect(
+    listener: TcpListener,
+    https_port: u16,
+    shutdown: Arc<Shutdown>,
+) -> Result<()> {
     loop {
-        let Ok((stream, peer)) = listener.accept().await else {
+        let accepted = tokio::select! {
+            biased;
+            _ = shutdown.signalled() => return Ok(()),
+            accepted = listener.accept() => accepted,
+        };
+        let Ok((stream, peer)) = accepted else {
             tokio::time::sleep(Duration::from_millis(50)).await;
             continue;
         };
+        let token = shutdown.token();
 
         tokio::spawn(async move {
+            let _token = token;
             let io = TokioIo::new(stream);
             let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| async move {
                 let host = req

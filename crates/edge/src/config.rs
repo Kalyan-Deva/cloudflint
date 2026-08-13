@@ -58,6 +58,8 @@ pub struct NodeLimits {
     pub header_read_timeout: Duration,
     pub body_read_timeout: Duration,
     pub max_connection_age: Duration,
+    /// How long a shutdown waits for connections to finish before leaving anyway.
+    pub drain_timeout: Duration,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -181,6 +183,7 @@ pub fn parse(text: &str) -> Result<Config> {
             header_read_timeout: Duration::from_millis(raw.limits.header_read_timeout_ms),
             body_read_timeout: Duration::from_millis(raw.limits.body_read_timeout_ms),
             max_connection_age: Duration::from_secs(raw.limits.max_connection_age_secs),
+            drain_timeout: Duration::from_secs(raw.limits.drain_timeout_secs),
         },
         control_plane: raw.control_plane.map(|u| u.trim_end_matches('/').to_owned()),
         admin_listen: raw.admin_listen,
@@ -436,6 +439,8 @@ mod raw {
         pub body_read_timeout_ms: u64,
         #[serde(default = "default_conn_age")]
         pub max_connection_age_secs: u64,
+        #[serde(default = "default_drain")]
+        pub drain_timeout_secs: u64,
     }
 
     impl Default for Limits {
@@ -446,6 +451,7 @@ mod raw {
                 header_read_timeout_ms: default_header_timeout(),
                 body_read_timeout_ms: default_body_timeout(),
                 max_connection_age_secs: default_conn_age(),
+                drain_timeout_secs: default_drain(),
             }
         }
     }
@@ -684,6 +690,11 @@ mod raw {
     }
     fn default_conn_age() -> u64 {
         300
+    }
+    /// Long enough for a slow page, short enough that a deploy doesn't stall on one
+    /// stuck client. Kubernetes' own default grace period is 30s.
+    fn default_drain() -> u64 {
+        30
     }
     fn default_key() -> String {
         "ip".to_string()

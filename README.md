@@ -42,6 +42,23 @@ npm --prefix dashboard run dev
 The control plane prints a bootstrap token on first start. Give it to the edge and the
 dashboard — see Credentials below.
 
+### With Docker
+
+One image holds both binaries; which one runs is the command.
+
+```bash
+docker build -t cloudveil .
+```
+
+```bash
+CLOUDVEIL_API_TOKEN=cv_$(openssl rand -hex 32) CLOUDVEIL_ADMIN_TOKEN=cv_$(openssl rand -hex 32) docker compose up
+```
+
+That brings up the control plane on `127.0.0.1:9000`, the edge on `:8080` with its admin
+API on `127.0.0.1:9001`, and an nginx container to act as an origin. Edge config is
+`deploy/edge.yaml`, mounted read-only. Set `stop_grace_period` above the edge's
+`limits.drain_timeout_secs`, or the runtime will cut a drain short.
+
 ### Certificates
 
 ```bash
@@ -78,6 +95,7 @@ limits: # node-wide, applied at accept time
   header_read_timeout_ms: 10000
   body_read_timeout_ms: 30000
   max_connection_age_secs: 300
+  drain_timeout_secs: 30
 
 lists:
   trusted: [127.0.0.1, 10.0.0.0/8]
@@ -194,6 +212,20 @@ Two more environment variables, neither of them secret:
 Edge admin API: `/admin/health`, `/admin/stats`, `/admin/recent`, `/admin/stream`
 (SSE), `/admin/purge`, `/metrics`.
 
+## Shutting down
+
+On `SIGTERM` (or ctrl-c) the edge:
+
+1. reports `{"status":"draining"}` with a 503 on `/admin/health`, and
+   `cloudveil_draining 1` on `/metrics`;
+2. closes its traffic listeners, so nothing new is accepted;
+3. lets live connections finish the response in flight — HTTP/1.1 stops keeping alive,
+   HTTP/2 gets a GOAWAY;
+4. exits once the last one closes, or after `limits.drain_timeout_secs` regardless.
+
+The admin listener stays up for the whole drain so health can still be read. The control
+plane drains the same way, with a fixed 10s deadline.
+
 ## Metrics
 
 `GET /metrics` in Prometheus text format, on the edge's admin listener (`admin_listen`)
@@ -250,7 +282,7 @@ edge/control-plane loop.
 - Rate limit counters are per node.
 - Origin connections are HTTP/1.1.
 - One origin per zone; no health checking or failover yet.
-- Only ever run on Windows so far.
+- Built and tested on Windows and Linux. The container image has not been built yet.
 
 ## Licence
 

@@ -66,6 +66,9 @@ pub async fn serve(listener: TcpListener, edge: Arc<Edge>) -> anyhow::Result<()>
        your cache, and "keep it internal" is a document, not a control */
     let guard = Arc::new(Guard::from_env(TOKEN_VAR)?);
 
+    /* deliberately without a shutdown arm: this listener stays up for the whole drain
+       so an orchestrator can keep reading /admin/health and see the node say it is
+       going away. The process exiting is what closes it. */
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(v) => v,
@@ -108,10 +111,20 @@ async fn route(
     }
 
     match (req.method(), path.as_str()) {
-        (&Method::GET, "/admin/health") => ok(json!({
-            "status": "ok",
-            "uptime_s": started.elapsed().as_secs(),
-        })),
+        /* unhealthy the instant a shutdown starts, and before any listener closes: a
+           load balancer has to be told to stop sending work *first*, or it keeps
+           aiming requests at a node that is on its way out */
+        (&Method::GET, "/admin/health") => {
+            let draining = edge.shutdown.draining();
+            let body = json!({
+                "status": if draining { "draining" } else { "ok" },
+                "uptime_s": started.elapsed().as_secs(),
+            });
+            match draining {
+                false => ok(body),
+                true => json_with(StatusCode::SERVICE_UNAVAILABLE, body),
+            }
+        }
 
         (&Method::GET, "/admin/stats") => {
             let cfg = edge.snap.current();
@@ -177,6 +190,15 @@ fn metrics(edge: &Edge, started: Instant) -> Response<Body> {
         "cloudveil_uptime_seconds",
         "Seconds since this node's admin api came up.",
         started.elapsed().as_secs_f64(),
+    );
+    m::gauge(
+        &mut body,
+        "cloudveil_draining",
+        "1 while this node is shutting down and finishing its live connections.",
+        match edge.shutdown.draining() {
+            true => 1.0,
+            false => 0.0,
+        },
     );
 
     let (seen, dropped) = edge.analytics.counts();
@@ -310,9 +332,13 @@ fn query_limit(query: Option<&str>) -> Option<usize> {
 }
 
 fn ok(value: serde_json::Value) -> Response<Body> {
+    json_with(StatusCode::OK, value)
+}
+
+fn json_with(status: StatusCode, value: serde_json::Value) -> Response<Body> {
     let body = serde_json::to_vec(&value).unwrap_or_else(|_| b"{}".to_vec());
     Response::builder()
-        .status(StatusCode::OK)
+        .status(status)
         .header("content-type", "application/json")
         .body(full(body))
         .expect("json response is always valid")

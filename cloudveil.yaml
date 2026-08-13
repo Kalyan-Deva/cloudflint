@@ -32,6 +32,9 @@ limits:
   body_read_timeout_ms: 30000
   # An upper bound on any one connection, however well behaved.
   max_connection_age_secs: 300
+  # On SIGTERM: stop accepting, let live connections finish, then exit anyway after
+  # this long. Kubernetes' own grace period is 30s, so match it or lower it.
+  drain_timeout_secs: 30
 
 # Named lists the rules refer to as $name. Shared across zones.
 lists:
