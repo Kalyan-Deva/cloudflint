@@ -65,11 +65,11 @@ fn set_tokens() {
 async fn spawn_control_plane(edges: Vec<String>) -> (SocketAddr, Db) {
     let db = Db::open(":memory:").expect("in-memory db");
     db.add_token("tests", CP_TOKEN, 0).expect("token should store");
-    let api = Api {
-        db: db.clone(),
-        edges: Arc::new(edges),
-        edge_token: Some(Arc::new(ADMIN_TOKEN.to_string())),
-    };
+    let api = Api::new(
+        db.clone(),
+        edges,
+        Some(Arc::new(ADMIN_TOKEN.to_string())),
+    );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -379,11 +379,7 @@ async fn the_router_answers_health_in_process() {
     use tower::ServiceExt;
 
     let (_, db) = (0, Db::open(":memory:").unwrap());
-    let app = router(Api {
-        db,
-        edges: Arc::new(vec![]),
-        edge_token: None,
-    });
+    let app = router(Api::new(db, vec![], None));
     let resp = app
         .oneshot(
             AxumRequest::builder()

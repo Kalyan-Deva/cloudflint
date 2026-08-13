@@ -1,7 +1,5 @@
 //! Control plane API.
 
-use std::sync::Arc;
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use cloudveil_api::db::Db;
@@ -16,11 +14,7 @@ const TOKEN: &str = "cv_testtoken0123456789abcdef0123456789abcdef0123456789abcde
 fn app(edges: Vec<String>) -> axum::Router {
     let db = Db::open(":memory:").expect("in-memory db");
     db.add_token("tests", TOKEN, 0).expect("token should store");
-    router(Api {
-        db,
-        edges: Arc::new(edges),
-        edge_token: None,
-    })
+    router(Api::new(db, edges, None))
 }
 
 async fn call(
@@ -501,4 +495,63 @@ async fn an_empty_window_gives_an_empty_chart_rather_than_an_error() {
     let (status, body) = call(&app, "GET", "/v1/analytics/timeseries?since_mins=5", None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["buckets"].as_array().unwrap().is_empty());
+}
+
+/// The scrape is plain text, so it doesn't go through `call`.
+async fn scrape(app: &axum::Router, token: Option<&str>) -> (StatusCode, String) {
+    let mut req = Request::builder().uri("/metrics");
+    if let Some(token) = token {
+        req = req.header("authorization", format!("Bearer {token}"));
+    }
+    let resp = app
+        .clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .expect("router should answer");
+
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[tokio::test]
+async fn a_scrape_reports_the_management_path() {
+    let app = app(vec!["http://127.0.0.1:9".into()]);
+
+    let (status, _) = call(&app, "PUT", "/v1/config", Some(json!({ "yaml": config_for("demo") }))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = call(&app, "POST", "/v1/events", Some(json!([event("demo", 200, 900, Some("HIT"), "/")]))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = scrape(&app, Some(TOKEN)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert!(
+        body.contains("\ncloudveil_api_events_ingested_total 1\n"),
+        "the ingested event is missing:\n{body}"
+    );
+    assert!(body.contains(r#"cloudveil_api_config_writes_total{kind="stored"} 1"#));
+    assert!(body.contains("\ncloudveil_api_edges_configured 1\n"));
+    assert!(body.contains("\ncloudveil_api_active_revision 1\n"));
+    assert!(body.contains("cloudveil_api_uptime_seconds "));
+    assert!(body.contains("cloudveil_api_build_info{version="));
+}
+
+#[tokio::test]
+async fn a_scrape_of_the_control_plane_needs_a_token() {
+    let app = app(vec![]);
+    let (status, _) = scrape(&app, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_scrape_works_before_any_config_has_been_uploaded() {
+    let app = app(vec![]);
+    let (status, body) = scrape(&app, Some(TOKEN)).await;
+
+    assert_eq!(status, StatusCode::OK, "a scrape must not depend on there being a config");
+    assert!(
+        !body.contains("cloudveil_api_active_revision"),
+        "with no config there is no revision to report:\n{body}"
+    );
 }

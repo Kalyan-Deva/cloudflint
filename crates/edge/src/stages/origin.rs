@@ -6,6 +6,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use hyper::header::{HeaderMap, HeaderName, HeaderValue};
@@ -17,6 +18,7 @@ use tracing::debug;
 
 use crate::body::{adapt, full, with_read_timeout, Body};
 use crate::config;
+use crate::metrics::Metrics;
 use crate::pipeline::{Ctx, Stage, StageError, Verdict};
 
 pub type HttpClient = Client<HttpConnector, Body>;
@@ -35,16 +37,47 @@ const HOP_BY_HOP: &[&str] = &[
 
 pub struct Fetcher {
     client: HttpClient,
+    /// Optional so a `Fetcher` can be built in a test without a registry.
+    metrics: Option<Arc<Metrics>>,
 }
 
 impl Fetcher {
     pub fn new() -> Self {
         Self {
             client: Client::builder(TokioExecutor::new()).build_http(),
+            metrics: None,
         }
     }
 
+    pub fn metered(metrics: Arc<Metrics>) -> Self {
+        Self {
+            metrics: Some(metrics),
+            ..Self::new()
+        }
+    }
+
+    /// Every origin request goes through here - the cache's background revalidations
+    /// as well as the terminal stage's - which makes it the only place that sees all
+    /// of them. The zone is passed in because an `Origin` doesn't know its own name.
     pub async fn fetch(
+        &self,
+        zone: &str,
+        origin: &config::Origin,
+        host: &str,
+        peer: SocketAddr,
+        tls: bool,
+        req: Request<Body>,
+    ) -> Result<Response<Body>, StageError> {
+        let started = Instant::now();
+        let out = self.send(origin, host, peer, tls, req).await;
+
+        if let Some(metrics) = &self.metrics {
+            metrics.origin_call(zone, started.elapsed(), kind_of(&out));
+        }
+        out
+    }
+
+    async fn send(
         &self,
         origin: &config::Origin,
         host: &str,
@@ -127,6 +160,16 @@ impl Default for Fetcher {
     }
 }
 
+/// Why a fetch failed, or None if it didn't. A 5xx the origin chose to send is not an
+/// error here - it arrived, and it is already counted by status in `requests_total`.
+fn kind_of(out: &Result<Response<Body>, StageError>) -> Option<&'static str> {
+    match out {
+        Ok(_) => None,
+        Err(e) if e.status == StatusCode::GATEWAY_TIMEOUT => Some("timeout"),
+        Err(_) => Some("unreachable"),
+    }
+}
+
 pub struct Origin {
     fetcher: Arc<Fetcher>,
 }
@@ -152,7 +195,14 @@ impl Stage for Origin {
         };
         let resp = self
             .fetcher
-            .fetch(&ctx.zone.origin, &ctx.host, ctx.peer, ctx.tls, req)
+            .fetch(
+                &ctx.zone.name,
+                &ctx.zone.origin,
+                &ctx.host,
+                ctx.peer,
+                ctx.tls,
+                req,
+            )
             .await?;
         Ok(Verdict::Respond(resp))
     }

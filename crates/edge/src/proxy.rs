@@ -48,6 +48,22 @@ pub async fn handle(
 
     let took = started.elapsed();
     let status = outcome.resp.status();
+    let cache = outcome
+        .resp
+        .headers()
+        .get(CACHE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+
+    /* metrics and the event are recorded from the same three facts, so a graph and
+       the log can't tell different stories about one request */
+    edge.metrics.request(
+        &outcome.zone,
+        status.as_u16(),
+        outcome.decided_by,
+        took,
+        cache.as_deref(),
+    );
 
     edge.analytics.record(Event {
         at_ms: now_ms(),
@@ -58,12 +74,7 @@ pub async fn handle(
         status: status.as_u16(),
         duration_us: took.as_micros() as u64,
         decided_by: outcome.decided_by.to_string(),
-        cache: outcome
-            .resp
-            .headers()
-            .get(CACHE_HEADER)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned),
+        cache,
         client_ip: peer.ip().to_string(),
     });
 

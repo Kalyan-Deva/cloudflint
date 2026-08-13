@@ -4,17 +4,13 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use cloudveil_edge::snapshot::{self, Snapshot};
 use cloudveil_edge::tls::{self, Tls};
-use cloudveil_edge::{admin, config, serve, serve_redirect, serve_tls, Edge};
+use cloudveil_edge::{admin, config, logging, serve, serve_redirect, serve_tls, Edge};
 use tokio::net::TcpListener;
 use tracing::info;
-use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .with_target(false)
-        .init();
+    logging::init();
 
     let path: PathBuf = std::env::args()
         .nth(1)
@@ -69,7 +65,7 @@ async fn main() -> Result<()> {
         let listener = TcpListener::bind(addr)
             .await
             .with_context(|| format!("binding admin listener on {addr}"))?;
-        info!("admin api on {addr} - purge and stats, no authentication, keep it internal");
+        info!("admin api on {addr} - purge, stats and /metrics, bearer token required");
         let edge = edge.clone();
         tokio::spawn(async move {
             if let Err(e) = admin::serve(listener, edge).await {

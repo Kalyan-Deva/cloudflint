@@ -108,7 +108,14 @@ impl Cache {
         };
         let fetched = self
             .fetcher
-            .fetch(&ctx.zone.origin, &ctx.host, ctx.peer, ctx.tls, req)
+            .fetch(
+                &ctx.zone.name,
+                &ctx.zone.origin,
+                &ctx.host,
+                ctx.peer,
+                ctx.tls,
+                req,
+            )
             .await;
 
         /* an origin usually fails by answering 503, not by refusing the connection,
@@ -212,10 +219,11 @@ impl Cache {
         let key = key.clone();
         let path = key.path.clone();
         let ttl_policy = ctx.zone.cache.clone();
+        let zone = ctx.zone.name.clone();
 
         tokio::spawn(async move {
             let _leader = leader;
-            let resp = match fetcher.fetch(&origin, &host, peer, tls, replay).await {
+            let resp = match fetcher.fetch(&zone, &origin, &host, peer, tls, replay).await {
                 Ok(resp) => resp,
                 Err(e) => {
                     warn!("{host} {path}: background revalidation failed: {}", e.detail);

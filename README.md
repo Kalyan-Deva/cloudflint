@@ -23,6 +23,7 @@ Two processes and a dashboard:
 - **WebSockets** and other `Upgrade` connections pass through.
 - **Control plane** holding config as revisions with one-click rollback, plus
   analytics ingested from the edges.
+- **Prometheus `/metrics`** on both processes, and JSON logs on request.
 
 ## Running it
 
@@ -165,6 +166,15 @@ Secrets come from the environment, not from config.
 `/health` on both APIs is unauthenticated so orchestrators can probe it. Everything
 else needs a bearer token.
 
+Two more environment variables, neither of them secret:
+
+| Variable | Where | What |
+|---|---|---|
+| `CLOUDVEIL_LOG_FORMAT` | both | `json` for one JSON object per line; anything else is the human format |
+| `CLOUDVEIL_METRICS_OPEN` | both | `1` serves `/metrics` without a token |
+
+`RUST_LOG` sets the level and filter as usual; the default is `info`.
+
 ## API
 
 | | |
@@ -182,7 +192,48 @@ else needs a bearer token.
 | `GET/POST/DELETE /v1/tokens` | mint, list, revoke |
 
 Edge admin API: `/admin/health`, `/admin/stats`, `/admin/recent`, `/admin/stream`
-(SSE), `/admin/purge`.
+(SSE), `/admin/purge`, `/metrics`.
+
+## Metrics
+
+`GET /metrics` in Prometheus text format, on the edge's admin listener (`admin_listen`)
+and on the control plane. Both need a bearer token unless `CLOUDVEIL_METRICS_OPEN=1`.
+
+```yaml
+scrape_configs:
+  - job_name: cloudveil-edge
+    static_configs: [{ targets: ["127.0.0.1:9001"] }]
+    authorization: { credentials: "cv_..." } # CLOUDVEIL_ADMIN_TOKEN
+```
+
+From the edge:
+
+| Series | Type | Labels |
+|---|---|---|
+| `cloudveil_requests_total` | counter | `zone`, `status`, `decided_by` |
+| `cloudveil_request_duration_seconds` | histogram | `zone` |
+| `cloudveil_cache_results_total` | counter | `zone`, `result` (`hit`/`miss`/`stale`/`stale-error`/`bypass`) |
+| `cloudveil_waf_matches_total` | counter | `zone`, `rule`, `severity`, `action` |
+| `cloudveil_ratelimit_decisions_total` | counter | `zone`, `rule`, `action` |
+| `cloudveil_ratelimit_factor` | gauge | `zone` — below 1 while the adaptive tier is tightening |
+| `cloudveil_origin_requests_total` | counter | `zone` |
+| `cloudveil_origin_errors_total` | counter | `zone`, `kind` (`unreachable`/`timeout`) |
+| `cloudveil_origin_duration_seconds` | histogram | `zone` |
+| `cloudveil_connections_total` | counter | |
+| `cloudveil_connections_refused_total` | counter | `reason` (`too_many`/`too_fast`) |
+| `cloudveil_connections_active` | gauge | |
+| `cloudveil_tls_handshake_failures_total` | counter | `reason` (`failed`/`timeout`) |
+| `cloudveil_cache_entries`, `cloudveil_cache_bytes` | gauge | |
+| `cloudveil_zones`, `cloudveil_uptime_seconds` | gauge | |
+| `cloudveil_events_recorded_total`, `cloudveil_events_dropped_total` | counter | |
+| `cloudveil_metrics_series_dropped_total` | counter | above zero means a series hit its cardinality cap |
+| `cloudveil_build_info` | gauge | `version` |
+
+A request that matched no zone is labelled `zone="unrouted"`. From the control plane:
+`cloudveil_api_events_ingested_total`, `cloudveil_api_config_writes_total{kind}`,
+`cloudveil_api_purges_total{outcome}`, `cloudveil_api_uptime_seconds`,
+`cloudveil_api_edges_configured`, `cloudveil_api_active_revision`,
+`cloudveil_api_build_info`.
 
 ## Tests
 

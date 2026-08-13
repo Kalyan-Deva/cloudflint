@@ -9,6 +9,8 @@ pub mod cache;
 pub mod config;
 pub mod cp;
 pub mod limits;
+pub mod logging;
+pub mod metrics;
 pub mod pages;
 pub mod pipeline;
 pub mod proxy;
@@ -34,6 +36,7 @@ use crate::body::{full, Body};
 use crate::cache::Store;
 use crate::config::NodeLimits;
 use crate::limits::conn::ConnLimits;
+use crate::metrics::Metrics;
 use crate::pipeline::Pipeline;
 use crate::snapshot::Snapshot;
 use crate::tls::Tls;
@@ -48,6 +51,7 @@ pub struct Edge {
     pub snap: Arc<Snapshot>,
     pub store: Arc<Store>,
     pub analytics: Arc<analytics::Sink>,
+    pub metrics: Arc<Metrics>,
     pub tls: Option<Arc<Tls>>,
     pipeline: Arc<Pipeline>,
     node: NodeLimits,
@@ -65,13 +69,15 @@ impl Edge {
             boot.cache.max_object_bytes,
         ));
         let analytics = analytics::Sink::new(boot.control_plane.clone());
-        let pipeline = Arc::new(stages::build(store.clone()));
+        let metrics = Arc::new(Metrics::new());
+        let pipeline = Arc::new(stages::build(store.clone(), metrics.clone()));
         let node = boot.limits;
 
         Arc::new(Edge {
             snap,
             store,
             analytics,
+            metrics,
             tls,
             pipeline,
             node,
@@ -104,9 +110,10 @@ async fn accept_loop(
     acceptor: Option<TlsAcceptor>,
 ) -> Result<()> {
     let node = edge.node;
-    let conns = Arc::new(ConnLimits::new(
+    let conns = Arc::new(ConnLimits::metered(
         node.max_connections_per_ip,
         node.new_connections_per_ip_per_sec,
+        edge.metrics.clone(),
     ));
     let handshake_timeout = edge
         .snap
@@ -144,6 +151,7 @@ async fn accept_loop(
         let acceptor = acceptor.clone();
         tokio::spawn(async move {
             let _guard = guard;
+            let metrics = edge.metrics.clone();
 
             match acceptor {
                 None => run(TokioIo::new(stream), edge, peer, node, false).await,
@@ -151,9 +159,17 @@ async fn accept_loop(
                     /* the header timeout can't cover this: it only starts once there
                        is a decrypted stream to read headers from */
                     match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
-                        Ok(Ok(stream)) => run(TokioIo::new(stream), edge, peer, node, true).await,
-                        Ok(Err(e)) => debug!("{peer}: tls handshake failed: {e}"),
-                        Err(_) => debug!("{peer}: tls handshake timed out"),
+                        Ok(Ok(stream)) => {
+                            run(TokioIo::new(stream), edge, peer, node, true).await
+                        }
+                        Ok(Err(e)) => {
+                            metrics.tls_handshake_failures.inc(&["failed"]);
+                            debug!("{peer}: tls handshake failed: {e}");
+                        }
+                        Err(_) => {
+                            metrics.tls_handshake_failures.inc(&["timeout"]);
+                            debug!("{peer}: tls handshake timed out");
+                        }
                     }
                 }
             }

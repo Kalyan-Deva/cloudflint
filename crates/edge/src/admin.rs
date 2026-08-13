@@ -9,6 +9,13 @@
 //! editable in the dashboard, which is no place for a secret. Bind it to loopback or
 //! an interface only your control plane can reach as well; the token is the control,
 //! the network boundary is the belt.
+//!
+//! `/metrics` lives here too, on the same listener, so it inherits that boundary: a
+//! scrape endpoint on the traffic port would be reachable by everyone the proxy is
+//! for. It is token-guarded like everything else, because Prometheus can hold a bearer
+//! token and a scrape is a list of your zones, rule ids and traffic shape. Setting
+//! `CLOUDVEIL_METRICS_OPEN=1` opens that one endpoint, for the case where the admin
+//! listener is already on an interface only the monitoring network can reach.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -46,6 +53,12 @@ pub struct PurgeRequest {
 
 /// Where the admin token comes from. Not the config file - see `auth`.
 pub const TOKEN_VAR: &str = "CLOUDVEIL_ADMIN_TOKEN";
+/// Set to `1` to serve `/metrics` without a token. See the module note.
+pub const METRICS_OPEN_VAR: &str = "CLOUDVEIL_METRICS_OPEN";
+
+fn metrics_are_open() -> bool {
+    matches!(std::env::var(METRICS_OPEN_VAR).as_deref(), Ok("1") | Ok("true"))
+}
 
 pub async fn serve(listener: TcpListener, edge: Arc<Edge>) -> anyhow::Result<()> {
     let started = Instant::now();
@@ -89,7 +102,8 @@ async fn route(
 
     /* health stays open so an orchestrator can probe it without holding a secret;
        it says nothing a port scan wouldn't already tell you */
-    if path != "/admin/health" && !guard.allows(req.headers()) {
+    let open = path == "/admin/health" || (path == "/metrics" && metrics_are_open());
+    if !open && !guard.allows(req.headers()) {
         return problem(StatusCode::UNAUTHORIZED, "a bearer token is required");
     }
 
@@ -116,12 +130,88 @@ async fn route(
             ok(json!(edge.analytics.recent(limit)))
         }
 
+        (&Method::GET, "/metrics") => metrics(&edge, started),
+
         (&Method::GET, "/admin/stream") => stream(&edge),
 
         (&Method::POST, "/admin/purge") => purge(req, &edge.store, &edge.snap).await,
 
         _ => problem(StatusCode::NOT_FOUND, "no such endpoint"),
     }
+}
+
+/// A Prometheus scrape.
+///
+/// Two kinds of number end up in one document: the counters the request path records
+/// as it goes, and the values that are read off live state right here. Cache size,
+/// uptime and the event counts are the second kind - mirroring them into the registry
+/// would give them one more chance to be wrong, and they cost a mutex to read.
+fn metrics(edge: &Edge, started: Instant) -> Response<Body> {
+    use crate::metrics as m;
+
+    let mut body = edge.metrics.render();
+
+    let stats = edge.store.stats();
+    m::gauge(
+        &mut body,
+        "cloudveil_cache_entries",
+        "Responses currently held in the cache.",
+        stats.entries as f64,
+    );
+    m::gauge(
+        &mut body,
+        "cloudveil_cache_bytes",
+        "Bytes of cached response bodies and headers.",
+        stats.bytes as f64,
+    );
+
+    let cfg = edge.snap.current();
+    m::gauge(
+        &mut body,
+        "cloudveil_zones",
+        "Zones in the config this node is serving.",
+        cfg.zones.len() as f64,
+    );
+    m::gauge(
+        &mut body,
+        "cloudveil_uptime_seconds",
+        "Seconds since this node's admin api came up.",
+        started.elapsed().as_secs_f64(),
+    );
+
+    let (seen, dropped) = edge.analytics.counts();
+    m::counter(
+        &mut body,
+        "cloudveil_events_recorded_total",
+        "Request events recorded.",
+        seen as f64,
+    );
+    m::counter(
+        &mut body,
+        "cloudveil_events_dropped_total",
+        "Request events shed because the queue to the control plane was full.",
+        dropped as f64,
+    );
+    m::counter(
+        &mut body,
+        "cloudveil_metrics_series_dropped_total",
+        "Records dropped because a metric hit its series cap. Above zero means a \
+         series is missing rather than idle.",
+        edge.metrics.dropped_series() as f64,
+    );
+    m::labelled_gauge(
+        &mut body,
+        "cloudveil_build_info",
+        "Always 1; the version is in the label.",
+        &[("version", env!("CARGO_PKG_VERSION"))],
+        1.0,
+    );
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", m::CONTENT_TYPE)
+        .body(full(body))
+        .expect("metrics response is always valid")
 }
 
 /// Server-sent events, one request event per message.

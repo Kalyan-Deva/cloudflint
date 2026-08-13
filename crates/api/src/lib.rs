@@ -6,6 +6,7 @@
 //! an outage.
 
 pub mod db;
+pub mod metrics;
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -21,6 +22,7 @@ use serde_json::json;
 use tracing::{info, warn};
 
 use crate::db::Db;
+use crate::metrics::ApiMetrics;
 
 /// Events older than this are dropped on ingest.
 const KEEP_EVENTS: Duration = Duration::from_secs(7 * 24 * 3600);
@@ -34,6 +36,18 @@ pub struct Api {
     /// The token this process presents to those edges. Their admin API is guarded
     /// too, so asking politely is not enough.
     pub edge_token: Option<Arc<String>>,
+    pub metrics: Arc<ApiMetrics>,
+}
+
+impl Api {
+    pub fn new(db: Db, edges: Vec<String>, edge_token: Option<Arc<String>>) -> Self {
+        Api {
+            db,
+            edges: Arc::new(edges),
+            edge_token,
+            metrics: ApiMetrics::new(),
+        }
+    }
 }
 
 pub fn router(api: Api) -> Router {
@@ -54,10 +68,43 @@ pub fn router(api: Api) -> Router {
         .route("/v1/tokens/{id}", axum::routing::delete(revoke_token))
         .route_layer(axum::middleware::from_fn_with_state(api.clone(), require_token));
 
+    /* the same call as the edge makes about its own /metrics, and for the same
+       reasons - see cloudveil_edge::admin */
+    let scrape = Router::new().route("/metrics", get(metrics));
+    let scrape = match metrics_are_open() {
+        true => scrape,
+        false => scrape.route_layer(axum::middleware::from_fn_with_state(
+            api.clone(),
+            require_token,
+        )),
+    };
+
     Router::new()
         .route("/health", get(health))
         .merge(guarded)
+        .merge(scrape)
         .with_state(api)
+}
+
+fn metrics_are_open() -> bool {
+    matches!(
+        std::env::var(cloudveil_edge::admin::METRICS_OPEN_VAR).as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
+/// A Prometheus scrape of the management path. The traffic numbers are the edge's.
+async fn metrics(State(api): State<Api>) -> impl IntoResponse {
+    /* a scrape must not be able to fail: an unreadable database is exactly when
+       somebody is looking at this, so it reports what it can and leaves the revision
+       out rather than answering 500 */
+    let revision = api.db.active_config().ok().flatten().map(|c| c.revision);
+    let body = api.metrics.render(revision, api.edges.len());
+
+    (
+        [(axum::http::header::CONTENT_TYPE, cloudveil_edge::metrics::CONTENT_TYPE)],
+        body,
+    )
 }
 
 /// Every guarded route goes through here first.
@@ -183,6 +230,7 @@ async fn put_config(State(api): State<Api>, Json(body): Json<PutConfig>) -> ApiR
         .put_config(&body.yaml, &body.note, now_ms())
         .map_err(bad_request)?;
 
+    api.metrics.config_writes.inc(&["stored"]);
     info!("config revision {id} stored and made active");
     Ok((StatusCode::CREATED, Json(json!({ "revision": id }))).into_response())
 }
@@ -203,6 +251,7 @@ async fn list_revisions(State(api): State<Api>, Query(q): Query<Limit>) -> ApiRe
 
 async fn activate(State(api): State<Api>, Path(id): Path<i64>) -> ApiResult {
     api.db.activate(id).map_err(bad_request)?;
+    api.metrics.config_writes.inc(&["rolled_back"]);
     info!("config revision {id} activated");
     Ok(Json(json!({ "revision": id })).into_response())
 }
@@ -212,6 +261,7 @@ async fn ingest(State(api): State<Api>, Json(events): Json<Vec<Event>>) -> ApiRe
         return Ok(Json(json!({ "stored": 0 })).into_response());
     }
     let stored = api.db.insert_events(&events).map_err(internal)?;
+    api.metrics.events.add(&[], stored as u64);
 
     let cutoff = now_ms() - KEEP_EVENTS.as_millis() as i64;
     if let Err(e) = api.db.prune_events(cutoff) {
@@ -456,6 +506,11 @@ async fn purge(State(api): State<Api>, Json(ask): Json<PurgeRequest>) -> ApiResu
     /* report per edge rather than collapsing to one status: "mostly purged" is a
        thing that happens, and hiding it would be worse than saying so */
     let all_ok = results.iter().all(|r| r.ok);
+    api.metrics.purges.inc(&[match (all_ok, results.iter().any(|r| r.ok)) {
+        (true, _) => "ok",
+        (false, true) => "partial",
+        (false, false) => "failed",
+    }]);
     let status = if all_ok {
         StatusCode::OK
     } else {

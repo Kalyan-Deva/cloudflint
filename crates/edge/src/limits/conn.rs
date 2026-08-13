@@ -12,6 +12,7 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
 use super::{key_of, Buckets};
+use crate::metrics::Metrics;
 
 pub struct ConnLimits {
     /// 0 means no cap.
@@ -19,6 +20,9 @@ pub struct ConnLimits {
     new_per_sec: f64,
     rate: Buckets,
     live: Mutex<HashMap<IpAddr, u32>>,
+    /// Counting connections belongs here because this is what already sees every
+    /// accept and every close - the guard's lifetime *is* the connection's.
+    metrics: Option<Arc<Metrics>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +39,9 @@ pub struct ConnGuard {
 
 impl Drop for ConnGuard {
     fn drop(&mut self) {
+        if let Some(metrics) = &self.limits.metrics {
+            metrics.connection_closed();
+        }
         let mut live = match self.limits.live.lock() {
             Ok(live) => live,
             Err(poisoned) => poisoned.into_inner(),
@@ -56,6 +63,15 @@ impl ConnLimits {
             new_per_sec: new_per_sec as f64,
             rate: Buckets::new(4096),
             live: Mutex::new(HashMap::new()),
+            metrics: None,
+        }
+    }
+
+    /// The same limits, counting what they see.
+    pub fn metered(max_per_ip: u32, new_per_sec: u32, metrics: Arc<Metrics>) -> Self {
+        ConnLimits {
+            metrics: Some(metrics),
+            ..Self::new(max_per_ip, new_per_sec)
         }
     }
 
@@ -64,7 +80,7 @@ impl ConnLimits {
             let key = key_of(&["conn", &ip.to_string()]);
             /* one second of connections is also the burst */
             if !self.rate.take(key, self.new_per_sec, self.new_per_sec).allowed {
-                return Err(Refusal::TooFast);
+                return Err(self.refuse(Refusal::TooFast));
             }
         }
 
@@ -72,15 +88,28 @@ impl ConnLimits {
             let mut live = self.live.lock().unwrap();
             let count = live.entry(ip).or_insert(0);
             if *count >= self.max_per_ip {
-                return Err(Refusal::TooMany);
+                return Err(self.refuse(Refusal::TooMany));
             }
             *count += 1;
         }
 
+        if let Some(metrics) = &self.metrics {
+            metrics.connection_opened();
+        }
         Ok(ConnGuard {
             limits: self.clone(),
             ip,
         })
+    }
+
+    fn refuse(&self, why: Refusal) -> Refusal {
+        if let Some(metrics) = &self.metrics {
+            metrics.connections_refused.inc(&[match why {
+                Refusal::TooMany => "too_many",
+                Refusal::TooFast => "too_fast",
+            }]);
+        }
+        why
     }
 
     #[cfg(test)]

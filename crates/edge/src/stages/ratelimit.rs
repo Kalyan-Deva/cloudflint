@@ -14,6 +14,7 @@ use tracing::{info, warn};
 use crate::body::Body;
 use crate::limits::health::Health;
 use crate::limits::{key_of, Buckets, RateRule, Subject};
+use crate::metrics::Metrics;
 use crate::pages;
 use crate::pipeline::{Ctx, Stage, StageError, Verdict};
 use crate::waf::{Action, Decoded};
@@ -21,11 +22,16 @@ use crate::waf::{Action, Decoded};
 pub struct RateLimit {
     buckets: Arc<Buckets>,
     health: Arc<Health>,
+    metrics: Arc<Metrics>,
 }
 
 impl RateLimit {
-    pub fn new(buckets: Arc<Buckets>, health: Arc<Health>) -> Self {
-        Self { buckets, health }
+    pub fn new(buckets: Arc<Buckets>, health: Arc<Health>, metrics: Arc<Metrics>) -> Self {
+        Self {
+            buckets,
+            health,
+            metrics,
+        }
     }
 }
 
@@ -48,6 +54,10 @@ impl Stage for RateLimit {
         };
 
         let factor = self.health.factor(&zone.name, &zone.adaptive);
+        /* a gauge rather than a counter: what an alert wants to know is whether this
+           zone is tightened right now, not how many times it has been */
+        self.metrics.ratelimit_factor.set(&[&zone.name], factor);
+
         let decoded = Decoded::new(req, &ctx.host, ctx.peer.ip(), ctx.tls);
         let input = decoded.input("");
 
@@ -72,11 +82,15 @@ impl Stage for RateLimit {
             }
 
             match rule.action {
-                Action::Log => info!(
-                    "ratelimit log {} {} {} would have been limited",
-                    rule.id, ctx.host, subject
-                ),
+                Action::Log => {
+                    self.metrics.ratelimit(&zone.name, &rule.id, "log");
+                    info!(
+                        "ratelimit log {} {} {} would have been limited",
+                        rule.id, ctx.host, subject
+                    );
+                }
                 _ => {
+                    self.metrics.ratelimit(&zone.name, &rule.id, "block");
                     warn!(
                         "ratelimit block {} {} {}{} retry in {:?}",
                         rule.id,

@@ -1,6 +1,8 @@
 //! WAF stage. Runs head rules first, and only buffers the body if some rule
 //! actually asks for it - a request blocked on its user agent never costs a read.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use http_body_util::BodyExt;
 use hyper::body::Bytes;
@@ -9,11 +11,20 @@ use tracing::{info, warn};
 
 use crate::body::{full, prefixed, Body};
 use crate::config::{OnOversized, WafPolicy};
+use crate::metrics::Metrics;
 use crate::pages;
 use crate::pipeline::{Ctx, Stage, StageError, Verdict};
 use crate::waf::{Decoded, Match, Outcome, Phase};
 
-pub struct Waf;
+pub struct Waf {
+    metrics: Arc<Metrics>,
+}
+
+impl Waf {
+    pub fn new(metrics: Arc<Metrics>) -> Self {
+        Self { metrics }
+    }
+}
 
 #[async_trait]
 impl Stage for Waf {
@@ -30,13 +41,14 @@ impl Stage for Waf {
         let mut log = Vec::new();
         match scan(ctx, "", Phase::Head, &mut log)? {
             Outcome::Block(hit) => {
-                report(ctx, &log);
-                return Ok(Verdict::Respond(blocked(ctx, &hit)));
+                self.report(ctx, &log);
+                return Ok(Verdict::Respond(self.blocked(ctx, &hit)));
             }
             /* a skip rule wins outright - don't even read the body */
             Outcome::Skip(hit) => {
                 info!("{}: rule {} skipped the waf", ctx.host, hit.rule);
-                report(ctx, &log);
+                self.count(ctx, &hit, "skip");
+                self.report(ctx, &log);
                 return Ok(Verdict::Continue);
             }
             Outcome::Allow => {}
@@ -44,51 +56,54 @@ impl Stage for Waf {
 
         if policy.rules.needs_body() {
             let body = buffer_body(ctx, policy).await?;
-            if let Some(verdict) = check_body(ctx, policy, &body, &mut log)? {
+            if let Some(verdict) = self.check_body(ctx, policy, &body, &mut log)? {
                 return Ok(verdict);
             }
         }
 
-        report(ctx, &log);
+        self.report(ctx, &log);
         Ok(Verdict::Continue)
     }
 }
 
-/// Second pass, over the buffered body. Split out so the borrow of `body` stays
-/// clear of the mutation `buffer_body` needs.
-fn check_body(
-    ctx: &mut Ctx<'_>,
-    policy: &WafPolicy,
-    body: &Buffered,
-    log: &mut Vec<Match>,
-) -> Result<Option<Verdict>, StageError> {
-    if body.truncated && policy.on_oversized_body == OnOversized::Block {
-        warn!(
-            "{}: body over {} bytes and on_oversized_body is block",
-            ctx.host, policy.max_body_bytes
-        );
-        let hit = Match {
-            rule: "body-too-large-to-inspect".into(),
-            action: crate::waf::Action::Block,
-            severity: crate::waf::Severity::Medium,
-        };
-        report(ctx, log);
-        return Ok(Some(Verdict::Respond(blocked(ctx, &hit))));
-    }
-    if body.truncated {
-        warn!(
-            "{}: only the first {} bytes of the body were inspected",
-            ctx.host, policy.max_body_bytes
-        );
-    }
-
-    let text = String::from_utf8_lossy(body.inspectable(policy.max_body_bytes)).into_owned();
-    match scan(ctx, &text, Phase::Body, log)? {
-        Outcome::Block(hit) => {
-            report(ctx, log);
-            Ok(Some(Verdict::Respond(blocked(ctx, &hit))))
+impl Waf {
+    /// Second pass, over the buffered body. Split out so the borrow of `body` stays
+    /// clear of the mutation `buffer_body` needs.
+    fn check_body(
+        &self,
+        ctx: &mut Ctx<'_>,
+        policy: &WafPolicy,
+        body: &Buffered,
+        log: &mut Vec<Match>,
+    ) -> Result<Option<Verdict>, StageError> {
+        if body.truncated && policy.on_oversized_body == OnOversized::Block {
+            warn!(
+                "{}: body over {} bytes and on_oversized_body is block",
+                ctx.host, policy.max_body_bytes
+            );
+            let hit = Match {
+                rule: "body-too-large-to-inspect".into(),
+                action: crate::waf::Action::Block,
+                severity: crate::waf::Severity::Medium,
+            };
+            self.report(ctx, log);
+            return Ok(Some(Verdict::Respond(self.blocked(ctx, &hit))));
         }
-        Outcome::Skip(_) | Outcome::Allow => Ok(None),
+        if body.truncated {
+            warn!(
+                "{}: only the first {} bytes of the body were inspected",
+                ctx.host, policy.max_body_bytes
+            );
+        }
+
+        let text = String::from_utf8_lossy(body.inspectable(policy.max_body_bytes)).into_owned();
+        match scan(ctx, &text, Phase::Body, log)? {
+            Outcome::Block(hit) => {
+                self.report(ctx, log);
+                Ok(Some(Verdict::Respond(self.blocked(ctx, &hit))))
+            }
+            Outcome::Skip(_) | Outcome::Allow => Ok(None),
+        }
     }
 }
 
@@ -161,28 +176,43 @@ async fn buffer_body(ctx: &mut Ctx<'_>, policy: &WafPolicy) -> Result<Buffered, 
     Ok(Buffered { bytes, truncated })
 }
 
-fn report(ctx: &Ctx<'_>, log: &[Match]) {
-    for hit in log {
-        info!(
-            "waf log {} severity={} {} {} {}",
+impl Waf {
+    fn report(&self, ctx: &Ctx<'_>, log: &[Match]) {
+        for hit in log {
+            info!(
+                "waf log {} severity={} {} {} {}",
+                hit.rule,
+                hit.severity,
+                ctx.peer.ip(),
+                ctx.host,
+                ctx.req().map(|r| r.uri().path()).unwrap_or("-")
+            );
+            self.count(ctx, hit, "log");
+        }
+    }
+
+    fn blocked(&self, ctx: &Ctx<'_>, hit: &Match) -> Response<Body> {
+        warn!(
+            "waf block {} severity={} {} {} {}",
             hit.rule,
             hit.severity,
             ctx.peer.ip(),
             ctx.host,
             ctx.req().map(|r| r.uri().path()).unwrap_or("-")
         );
+        self.count(ctx, hit, "block");
+
+        pages::blocked()
     }
-}
 
-fn blocked(ctx: &Ctx<'_>, hit: &Match) -> Response<Body> {
-    warn!(
-        "waf block {} severity={} {} {} {}",
-        hit.rule,
-        hit.severity,
-        ctx.peer.ip(),
-        ctx.host,
-        ctx.req().map(|r| r.uri().path()).unwrap_or("-")
-    );
-
-    pages::blocked()
+    /// Every match, whatever the rule did with it. A rule in dry-run is the case that
+    /// most wants a graph: you turn it on to find out how often it would have fired.
+    fn count(&self, ctx: &Ctx<'_>, hit: &Match, action: &str) {
+        self.metrics.waf_match(
+            &ctx.zone.name,
+            &hit.rule,
+            &hit.severity.to_string(),
+            action,
+        );
+    }
 }

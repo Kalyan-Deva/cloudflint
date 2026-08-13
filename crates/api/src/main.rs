@@ -9,7 +9,6 @@ use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
-use tracing_subscriber::EnvFilter;
 
 /// Bootstrap token, read once when the database has none.
 const BOOTSTRAP_VAR: &str = "CLOUDVEIL_API_TOKEN";
@@ -23,10 +22,7 @@ const EDGE_TOKEN_VAR: &str = "CLOUDVEIL_EDGE_TOKEN";
 /// Usage: cloudveil-api [listen] [db path] [edge admin url, ...]
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .with_target(false)
-        .init();
+    cloudveil_edge::logging::init();
     cloudveil_edge::tls::install_crypto_provider();
 
     let mut args = std::env::args().skip(1);
@@ -42,11 +38,7 @@ async fn main() -> Result<()> {
         warn!("{EDGE_TOKEN_VAR} is not set - the edges will refuse purges from here");
     }
 
-    let api = Api {
-        db,
-        edges: Arc::new(edges.clone()),
-        edge_token,
-    };
+    let api = Api::new(db, edges.clone(), edge_token);
 
     let listener = TcpListener::bind(&listen)
         .await
