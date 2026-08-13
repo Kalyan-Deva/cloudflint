@@ -7,6 +7,9 @@
 
 services:
   api:
+    # one image, named the same by both services, so `docker build -t cloudveil .`
+    # followed by `up --no-build` works and the image is only built once
+    image: cloudveil:latest
     build: .
     command: ["cloudveil-api", "0.0.0.0:9000", "/var/lib/cloudveil/cloudveil.db", "http://edge:9001"]
     environment:
@@ -30,6 +33,7 @@ services:
       start_period: 5s
 
   edge:
+    image: cloudveil:latest
     build: .
     command: ["cloudveil-edge", "/etc/cloudveil/cloudveil.yaml"]
     environment:

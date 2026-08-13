@@ -1,0 +1,123 @@
+name: ci
+
+# Nothing here uses a third-party action. Everything is either a shell command or an
+# action from GitHub's own org, so the only supply chain this repo depends on is the one
+# it already trusts to run the job at all.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # deliberately not RUSTFLAGS: -D warnings, which would also deny warnings inside
+  # dependencies and hand a stranger's new release the power to fail our build. Our own
+  # code is covered by the clippy step below.
+
+jobs:
+  test:
+    # both, and not for the sake of a badge: the signal handling is written twice, once
+    # behind cfg(unix) and once behind cfg(windows), so a single platform only ever
+    # compiles half of it
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-cargo-
+
+      - run: rustc --version && cargo --version
+
+      # clippy first: a lint error is quicker to read than a test failure caused by one
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - run: cargo test --workspace
+
+  # No `cargo fmt --check` on purpose. The source is formatted by hand - block comments
+  # explaining a decision sit where the decision is, and rustfmt reflows them into
+  # something less readable. Adding this gate would rewrite every file in the repo.
+
+  dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+        working-directory: dashboard
+      # next build typechecks the whole app, which is the part worth guarding
+      - run: npm run build
+        working-directory: dashboard
+
+  # The image, and then the thing the image is for. This job exists because the machine
+  # this was written on cannot run Docker at all, so the Dockerfile was never built.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: docker build -t cloudveil .
+
+      - name: Bring the stack up
+        env:
+          CLOUDVEIL_API_TOKEN: cv_ci0000000000000000000000000000000000000000000000000000000000
+          CLOUDVEIL_ADMIN_TOKEN: cv_ci1111111111111111111111111111111111111111111111111111111111
+        run: docker compose up -d --no-build
+
+      - name: Wait for the edge to report healthy
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9001/admin/health >/dev/null 2>&1; then
+              curl -sS http://127.0.0.1:9001/admin/health; echo; exit 0
+            fi
+            sleep 2
+          done
+          echo "the edge never came up"; exit 1
+
+      - name: Proxy a request to the origin behind it
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: localhost' http://127.0.0.1:8080/)
+          echo "GET / -> $code"
+          test "$code" = "200"
+
+      - name: The WAF is on by default
+        run: |
+          code=$(curl -gs -o /dev/null -w '%{http_code}' -H 'Host: localhost' \
+            'http://127.0.0.1:8080/?q=union+select+1')
+          echo "sqli -> $code"
+          test "$code" = "403"
+
+      # what a deploy actually does: SIGTERM, drain, exit 0. A non-zero code here means
+      # the container was killed rather than allowed to finish.
+      - name: Stopping drains rather than kills
+        run: |
+          docker compose stop -t 40 edge
+          code=$(docker inspect -f '{{.State.ExitCode}}' "$(docker compose ps -aq edge)")
+          echo "edge exit code: $code"
+          docker compose logs --no-color --tail 5 edge
+          test "$code" = "0"
+
+      - name: Logs, if any of that failed
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: Down
+        if: always()
+        run: docker compose down -v

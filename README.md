@@ -1,5 +1,7 @@
 # Cloudveil
 
+[![ci](https://github.com/Kalyan-Deva/cloudveil/actions/workflows/ci.yml/badge.svg)](https://github.com/Kalyan-Deva/cloudveil/actions/workflows/ci.yml)
+
 An edge reverse proxy with a WAF, a cache and rate limiting, written from scratch in
 Rust. Nothing here wraps nginx or Envoy.
 
@@ -297,8 +299,14 @@ cargo test
 ```
 
 Unit tests plus integration tests that run real origins over real sockets: forwarding,
-TLS and HTTP/2, upgrades, WAF rule fixtures, cache behaviour, rate limits, and the full
-edge/control-plane loop.
+TLS and HTTP/2, upgrades, WAF rule fixtures, cache behaviour, rate limits, shutdown
+draining, client-IP resolution, and the full edge/control-plane loop.
+
+CI runs `cargo clippy -D warnings` and the suite on Linux and Windows — both, because the
+signal handling is written twice behind `cfg(unix)` and `cfg(windows)` — plus the
+dashboard build, and a Docker job that builds the image, brings the compose stack up,
+proxies a request through it, checks the WAF blocks, and asserts the container exits 0
+when stopped. There is no `cargo fmt` check: the source is formatted by hand.
 
 ## Notes
 
