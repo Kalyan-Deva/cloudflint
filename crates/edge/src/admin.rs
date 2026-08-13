@@ -162,6 +162,8 @@ async fn route(
             ok(json!(edge.analytics.recent(limit)))
         }
 
+        (&Method::GET, "/admin/origins") => ok(origins(&edge)),
+
         (&Method::GET, "/metrics") => metrics(&edge, started),
 
         (&Method::GET, "/admin/stream") => stream(&edge),
@@ -170,6 +172,90 @@ async fn route(
 
         _ => problem(StatusCode::NOT_FOUND, "no such endpoint"),
     }
+}
+
+/// Everything known about each zone's backends, for the dashboard.
+///
+/// Read out of the metrics registry rather than kept a second time: the counters the
+/// request path already writes are the same numbers a person wants to see, and a parallel
+/// set of them would eventually disagree. Latency is a bucket estimate, good enough for
+/// "about 3ms" and not pretending to be more.
+fn origins(edge: &Edge) -> serde_json::Value {
+    let cfg = edge.snap.current();
+    let m = &edge.metrics;
+
+    let zones: Vec<_> = cfg
+        .zones
+        .iter()
+        .map(|zone| {
+            let name = zone.name.as_str();
+            let counts: Vec<u64> = zone
+                .origins
+                .origins
+                .iter()
+                .map(|o| m.origin_requests.get(&[name, o.authority.as_str()]))
+                .collect();
+            let total: u64 = counts.iter().sum();
+
+            let backends: Vec<_> = zone
+                .origins
+                .origins
+                .iter()
+                .zip(&counts)
+                .map(|(o, requests)| {
+                    let authority = o.authority.as_str();
+                    let errors: u64 = ["unreachable", "timeout"]
+                        .iter()
+                        .map(|kind| m.origin_errors.get(&[name, authority, kind]))
+                        .sum();
+                    let latency = |q: f64| {
+                        m.origin_duration
+                            .quantile(&[name, authority], q)
+                            .map(|s| (s * 1000.0 * 100.0).round() / 100.0)
+                    };
+
+                    json!({
+                        "origin": format!("{}://{}", o.scheme, authority),
+                        "authority": authority,
+                        "healthy": edge.origins.is_healthy(name, o),
+                        "weight": o.weight,
+                        "in_flight": edge.origins.in_flight(name, o),
+                        "requests": requests,
+                        "errors": errors,
+                        /* of the traffic this node sent to the zone, not of all of it */
+                        "traffic_share": match total {
+                            0 => 0.0,
+                            total => (*requests as f64 / total as f64 * 1000.0).round() / 10.0,
+                        },
+                        "error_rate": match requests {
+                            0 => 0.0,
+                            n => (errors as f64 / *n as f64 * 1000.0).round() / 10.0,
+                        },
+                        "p50_ms": latency(0.5),
+                        "p95_ms": latency(0.95),
+                        "probes_ok": m.origin_probes.get(&[name, authority, "ok"]),
+                        "probes_failed": m.origin_probes.get(&[name, authority, "failed"]),
+                    })
+                })
+                .collect();
+
+            json!({
+                "zone": name,
+                "strategy": zone.origins.strategy.as_str(),
+                "probe": zone.origins.probe.as_ref().map(|p| json!({
+                    "path": p.path,
+                    "every_secs": p.every.as_secs(),
+                })),
+                "unhealthy_after": zone.origins.unhealthy_after,
+                "retry_after_secs": zone.origins.retry_after.as_secs(),
+                "requests": total,
+                "failovers": m.origin_failovers.get(&[name]),
+                "origins": backends,
+            })
+        })
+        .collect();
+
+    json!({ "zones": zones, "recent_failovers": edge.origins.failovers() })
 }
 
 /// A Prometheus scrape.

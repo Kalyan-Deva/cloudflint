@@ -29,6 +29,7 @@ const NAV = [
     items: [
       { href: "/", label: "Dashboard", icon: Grid },
       { href: "/zones", label: "Zones", icon: Globe },
+      { href: "/origins", label: "Origins", icon: Stack },
     ],
   },
   {
@@ -237,6 +238,16 @@ function Pulse() {
   return (
     <svg {...ico}>
       <path d="M1.5 8h3l1.5-4 2.5 8 1.5-4h3.5" {...line} />
+    </svg>
+  );
+}
+/** Backends, stacked. */
+function Stack() {
+  return (
+    <svg {...ico}>
+      <rect x="2" y="2.5" width="12" height="3.5" rx="1" {...line} />
+      <rect x="2" y="10" width="12" height="3.5" rx="1" {...line} />
+      <path d="M8 6v4" {...line} />
     </svg>
   );
 }

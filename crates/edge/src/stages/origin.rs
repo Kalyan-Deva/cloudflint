@@ -135,8 +135,14 @@ impl Fetcher {
             let authority = origin.authority.as_str();
             if let Some(metrics) = &self.metrics {
                 metrics.origin_call(zone, authority, started.elapsed(), kind);
-                if attempt > 0 {
+            }
+            if attempt > 0 {
+                if let Some(metrics) = &self.metrics {
                     metrics.failover(zone);
+                }
+                if let Some(health) = &self.health {
+                    let from = pool.origins[candidates[attempt - 1]].authority.as_str();
+                    health.note_failover(zone, from, authority);
                 }
             }
             if let Some(health) = &self.health {

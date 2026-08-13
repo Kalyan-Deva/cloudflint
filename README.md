@@ -9,7 +9,9 @@ Two processes and a dashboard:
 
 - `cloudveil-edge` — data plane. tokio + hyper + rustls, sits in front of origins.
 - `cloudveil-api` — control plane. axum + SQLite. Owns config and analytics.
-- `dashboard/` — Next.js UI on port 3020.
+- `dashboard/` — Next.js UI on port 3020. Overview, zones, **origins** (health, latency,
+  error rate, traffic share, failover events), WAF rules with a rule tester, a live log,
+  config with revisions and rollback, and tokens.
 
 ## What it does
 
@@ -310,8 +312,13 @@ Two more environment variables, neither of them secret:
 | `POST /v1/purge` | `{url}`, `{tag}`, `{zone}` or `{all:true}` |
 | `GET/POST/DELETE /v1/tokens` | mint, list, revoke |
 
-Edge admin API: `/admin/health`, `/admin/stats`, `/admin/recent`, `/admin/stream`
-(SSE), `/admin/purge`, `/metrics`.
+Edge admin API: `/admin/health`, `/admin/stats`, `/admin/origins`, `/admin/recent`,
+`/admin/stream` (SSE), `/admin/purge`, `/metrics`.
+
+`/admin/origins` is the origin dashboard's data: per backend, whether it is in rotation,
+requests, errors and error rate, traffic share, in-flight count, p50/p95 estimated from the
+latency buckets, probe results, plus the last 32 failover events. All of it read out of the
+counters the request path already writes — there is no second set to disagree with them.
 
 ## Shutting down
 

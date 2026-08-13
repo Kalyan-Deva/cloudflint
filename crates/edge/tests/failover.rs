@@ -175,6 +175,17 @@ async fn post(edge: SocketAddr, path: &str, body: &str) -> StatusCode {
         .status()
 }
 
+async fn admin_json(admin: SocketAddr, path: &str) -> serde_json::Value {
+    let req = Request::builder()
+        .uri(format!("http://{admin}{path}"))
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let resp = client().request(req).await.expect("admin should answer");
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&body).expect("admin should answer json")
+}
+
 async fn scrape(admin: SocketAddr) -> String {
     let req = Request::builder()
         .uri(format!("http://{admin}/metrics"))
@@ -450,6 +461,53 @@ async fn a_probe_brings_an_origin_back_without_a_request_finding_it() {
         }
     }
     assert!(back, "a recovered origin should come back on its own");
+}
+
+#[tokio::test]
+async fn the_admin_api_reports_what_a_dashboard_needs() {
+    let dead = dead_port().await;
+    let backup = spawn_backend("backup").await;
+    let (_, edge, admin) = spawn_edge(&zone_yaml(
+        &[dead, backup.addr],
+        "      unhealthy_after: 1\n      retry_after_secs: 60\n",
+    ))
+    .await;
+
+    for _ in 0..3 {
+        assert_eq!(get(edge, "/").await.0, StatusCode::OK);
+    }
+
+    let report = admin_json(admin, "/admin/origins").await;
+    let zone = &report["zones"][0];
+
+    assert_eq!(zone["zone"], "demo");
+    assert_eq!(zone["strategy"], "first_healthy");
+    assert_eq!(zone["failovers"], 1, "one failover, then the dead one was skipped");
+
+    let origins = zone["origins"].as_array().unwrap();
+    assert_eq!(origins.len(), 2);
+    assert_eq!(origins[0]["healthy"], false, "the dead primary");
+    assert_eq!(origins[1]["healthy"], true);
+
+    /* everything that was served came from the backup */
+    assert_eq!(origins[1]["requests"], 3);
+    assert_eq!(origins[1]["traffic_share"], 75.0, "3 of 4 attempts");
+    assert_eq!(origins[1]["errors"], 0);
+    assert_eq!(origins[0]["errors"], 1);
+    assert!(
+        origins[1]["p50_ms"].as_f64().is_some(),
+        "a served origin should have a latency estimate: {}",
+        origins[1]
+    );
+    assert!(origins[0]["p95_ms"].is_null() || origins[0]["p95_ms"].as_f64().is_some());
+
+    /* and the failover shows up as an event, not just a count */
+    let events = report["recent_failovers"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["from"], dead.to_string());
+    assert_eq!(events[0]["to"], backup.addr.to_string());
+    assert_eq!(events[0]["zone"], "demo");
+    assert!(events[0]["at_ms"].as_u64().unwrap() > 0);
 }
 
 #[tokio::test]

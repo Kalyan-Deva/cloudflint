@@ -20,7 +20,7 @@
 //! whole site down is worse than no guess at all. Better to send a request at something
 //! that will probably fail than to answer 502 without trying.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -70,6 +70,21 @@ impl State {
     }
 }
 
+/// One request that had to be sent somewhere else. Kept as a list rather than only a
+/// counter because "it failed over 40 times" and "it failed over 40 times in the last
+/// minute, always away from the same backend" are different problems.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Failover {
+    pub at_ms: u64,
+    pub zone: String,
+    pub from: String,
+    pub to: String,
+}
+
+/// How many to remember. A dashboard shows a handful; anything longer belongs in the
+/// analytics the events already feed.
+const FAILOVERS: usize = 32;
+
 #[derive(Default)]
 pub struct Health {
     states: Mutex<HashMap<Key, State>>,
@@ -77,6 +92,7 @@ pub struct Health {
     next: Mutex<HashMap<String, usize>>,
     /// Only for the metrics gauge, which wants a number rather than a lock.
     live: AtomicUsize,
+    failovers: Mutex<VecDeque<Failover>>,
 }
 
 /// A zone plus an origin's authority. The authority rather than the index, so reordering
@@ -271,6 +287,30 @@ impl Health {
 
     pub fn probes_in_flight(&self) -> usize {
         self.live.load(Ordering::Relaxed)
+    }
+
+    pub fn note_failover(&self, zone: &str, from: &str, to: &str) {
+        let mut log = self.failovers.lock().unwrap_or_else(|e| e.into_inner());
+        if log.len() == FAILOVERS {
+            log.pop_front();
+        }
+        log.push_back(Failover {
+            at_ms: crate::analytics::now_ms(),
+            zone: zone.to_owned(),
+            from: from.to_owned(),
+            to: to.to_owned(),
+        });
+    }
+
+    /// Newest first, which is the order anybody looking at them wants.
+    pub fn failovers(&self) -> Vec<Failover> {
+        self.failovers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .rev()
+            .cloned()
+            .collect()
     }
 }
 

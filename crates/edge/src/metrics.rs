@@ -291,6 +291,43 @@ impl Histogram {
         self.touch(labels, |h| h.observe(took.as_secs_f64()));
     }
 
+    pub fn count(&self, labels: &[&str]) -> u64 {
+        self.peek(labels, |h| h.count.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// An estimate of a quantile from the bucket counts, the same way
+    /// `histogram_quantile` does it: find the bucket the rank falls in and interpolate
+    /// across it. Resolution is the bucket width, so this is for a dashboard reading
+    /// "about 3ms", not for an SLA.
+    pub fn quantile(&self, labels: &[&str], q: f64) -> Option<f64> {
+        self.peek(labels, |h| {
+            let total = h.count.load(Ordering::Relaxed);
+            if total == 0 {
+                return None;
+            }
+            let rank = q.clamp(0.0, 1.0) * total as f64;
+
+            let mut below = 0u64;
+            for (index, edge) in BUCKETS.iter().enumerate() {
+                let inside = h.buckets[index].load(Ordering::Relaxed);
+                let cumulative = below + inside;
+                if (cumulative as f64) >= rank {
+                    if inside == 0 {
+                        return Some(*edge);
+                    }
+                    let start = index.checked_sub(1).map(|i| BUCKETS[i]).unwrap_or(0.0);
+                    let into = (rank - below as f64) / inside as f64;
+                    return Some(start + (edge - start) * into);
+                }
+                below = cumulative;
+            }
+            /* past the last edge, where the only honest answer is "at least this" */
+            BUCKETS.last().copied()
+        })
+        .flatten()
+    }
+
     pub fn render_into(&self, out: &mut String) {
         self.header(out, "histogram");
         for block in self.sorted(|labels, hist| {
@@ -759,6 +796,30 @@ mod tests {
             line(&out, r#"cloudveil_request_duration_seconds_sum{zone="demo"}"#),
             Some("4.061".into())
         );
+    }
+
+    #[test]
+    fn quantiles_come_off_the_buckets() {
+        let m = Metrics::new();
+        /* 90 fast, 10 slow */
+        for _ in 0..90 {
+            m.request_duration.observe(&["demo"], Duration::from_millis(2));
+        }
+        for _ in 0..10 {
+            m.request_duration.observe(&["demo"], Duration::from_millis(400));
+        }
+
+        assert_eq!(m.request_duration.count(&["demo"]), 100);
+        let p50 = m.request_duration.quantile(&["demo"], 0.5).unwrap();
+        assert!((0.001..=0.0025).contains(&p50), "p50 was {p50}");
+        let p95 = m.request_duration.quantile(&["demo"], 0.95).unwrap();
+        assert!((0.25..=0.5).contains(&p95), "p95 was {p95}");
+    }
+
+    #[test]
+    fn a_quantile_of_nothing_is_nothing() {
+        let m = Metrics::new();
+        assert_eq!(m.request_duration.quantile(&["quiet"], 0.5), None);
     }
 
     #[test]
