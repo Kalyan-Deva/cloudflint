@@ -110,7 +110,7 @@ impl Cache {
             .fetcher
             .fetch(
                 &ctx.zone.name,
-                &ctx.zone.origin,
+                &ctx.zone.origins,
                 &ctx.host,
                 ctx.peer,
                 ctx.tls,
@@ -212,7 +212,7 @@ impl Cache {
 
         let fetcher = self.fetcher.clone();
         let store = self.store.clone();
-        let origin = ctx.zone.origin.clone();
+        let origins = ctx.zone.origins.clone();
         let host = ctx.host.clone();
         let peer = ctx.peer;
         let tls = ctx.tls;
@@ -223,7 +223,7 @@ impl Cache {
 
         tokio::spawn(async move {
             let _leader = leader;
-            let resp = match fetcher.fetch(&zone, &origin, &host, peer, tls, replay).await {
+            let resp = match fetcher.fetch(&zone, &origins, &host, peer, tls, replay).await {
                 Ok(resp) => resp,
                 Err(e) => {
                     warn!("{host} {path}: background revalidation failed: {}", e.detail);

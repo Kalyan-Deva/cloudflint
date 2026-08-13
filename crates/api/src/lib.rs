@@ -311,7 +311,12 @@ async fn timeseries(State(api): State<Api>, Query(q): Query<SeriesQuery>) -> Api
 pub struct ZoneView {
     pub name: String,
     pub hostnames: Vec<String>,
+    /// The first origin. Kept so anything reading one origin still works.
     pub origin: String,
+    pub origins: Vec<String>,
+    pub origin_strategy: &'static str,
+    /// The probe path, when active health checks are on.
+    pub origin_probe: Option<String>,
     pub preserve_host: bool,
     pub origin_timeout_ms: u64,
     pub waf_rules: Vec<String>,
@@ -340,9 +345,16 @@ async fn zones(State(api): State<Api>) -> ApiResult {
         .map(|z| ZoneView {
             name: z.name.clone(),
             hostnames: z.hostnames.clone(),
-            origin: format!("{}://{}", z.origin.scheme, z.origin.authority),
-            preserve_host: z.origin.preserve_host,
-            origin_timeout_ms: z.origin.timeout.as_millis() as u64,
+            /* the first origin, for anything that only has room for one */
+            origin: z.origins.urls().first().cloned().unwrap_or_default(),
+            origins: z.origins.urls(),
+            origin_strategy: match z.origins.strategy {
+                cloudveil_edge::config::Strategy::RoundRobin => "round_robin",
+                cloudveil_edge::config::Strategy::FirstHealthy => "first_healthy",
+            },
+            origin_probe: z.origins.probe.as_ref().map(|p| p.path.clone()),
+            preserve_host: z.origins.first().preserve_host,
+            origin_timeout_ms: z.origins.first().timeout.as_millis() as u64,
             waf_rules: z.waf.rules.rule_ids().iter().map(|s| s.to_string()).collect(),
             waf_reads_body: z.waf.rules.needs_body(),
             cache_enabled: z.cache.enabled,

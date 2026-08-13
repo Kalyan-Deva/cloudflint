@@ -341,6 +341,9 @@ pub struct Metrics {
     pub origin_requests: Counter,
     pub origin_errors: Counter,
     pub origin_duration: Histogram,
+    pub origin_healthy: Gauges,
+    pub origin_failovers: Counter,
+    pub origin_probes: Counter,
     pub connections: Counter,
     pub connections_refused: Counter,
     pub connections_active: Gauges,
@@ -390,17 +393,33 @@ impl Metrics {
             origin_requests: Counter::new(
                 "cloudveil_origin_requests_total",
                 "Requests sent to an origin, including background revalidations.",
-                &["zone"],
+                &["zone", "origin"],
             ),
             origin_errors: Counter::new(
                 "cloudveil_origin_errors_total",
                 "Origin requests that failed, by kind: unreachable or timeout.",
-                &["zone", "kind"],
+                &["zone", "origin", "kind"],
             ),
             origin_duration: Histogram::new(
                 "cloudveil_origin_duration_seconds",
                 "Time waiting for an origin to start answering.",
+                &["zone", "origin"],
+            ),
+            origin_healthy: Gauges::new(
+                "cloudveil_origin_healthy",
+                "1 while an origin is in rotation, 0 while it is taken out.",
+                &["zone", "origin"],
+            ),
+            origin_failovers: Counter::new(
+                "cloudveil_origin_failovers_total",
+                "Requests that had to be sent to a second origin because the first \
+                 could not be reached.",
                 &["zone"],
+            ),
+            origin_probes: Counter::new(
+                "cloudveil_origin_probes_total",
+                "Health probes sent, by result.",
+                &["zone", "origin", "result"],
             ),
             connections: Counter::new(
                 "cloudveil_connections_total",
@@ -458,13 +477,34 @@ impl Metrics {
 
     /// One origin fetch. `kind` is None when it worked - a 5xx from a healthy-looking
     /// origin is a status, not an error, and shows up in `requests_total`.
-    pub fn origin_call(&self, zone: &str, took: Duration, kind: Option<&str>) {
+    ///
+    /// Labelled by origin as well as zone, because with a pool the useful question stops
+    /// being "is the origin slow" and becomes "which one".
+    pub fn origin_call(&self, zone: &str, origin: &str, took: Duration, kind: Option<&str>) {
         let zone = zone_label(zone);
-        self.origin_requests.inc(&[zone]);
-        self.origin_duration.observe(&[zone], took);
+        self.origin_requests.inc(&[zone, origin]);
+        self.origin_duration.observe(&[zone, origin], took);
         if let Some(kind) = kind {
-            self.origin_errors.inc(&[zone, kind]);
+            self.origin_errors.inc(&[zone, origin, kind]);
         }
+    }
+
+    pub fn origin_health(&self, zone: &str, origin: &str, healthy: bool) {
+        self.origin_healthy.set(
+            &[zone_label(zone), origin],
+            match healthy {
+                true => 1.0,
+                false => 0.0,
+            },
+        );
+    }
+
+    pub fn failover(&self, zone: &str) {
+        self.origin_failovers.inc(&[zone_label(zone)]);
+    }
+
+    pub fn probe(&self, zone: &str, origin: &str, result: &str) {
+        self.origin_probes.inc(&[zone_label(zone), origin, result]);
     }
 
     pub fn connection_opened(&self) {
@@ -488,6 +528,9 @@ impl Metrics {
             + self.origin_requests.dropped()
             + self.origin_errors.dropped()
             + self.origin_duration.dropped()
+            + self.origin_healthy.dropped()
+            + self.origin_failovers.dropped()
+            + self.origin_probes.dropped()
             + self.connections.dropped()
             + self.connections_refused.dropped()
             + self.connections_active.dropped()
@@ -507,6 +550,9 @@ impl Metrics {
         self.origin_requests.render_into(&mut out);
         self.origin_errors.render_into(&mut out);
         self.origin_duration.render_into(&mut out);
+        self.origin_healthy.render_into(&mut out);
+        self.origin_failovers.render_into(&mut out);
+        self.origin_probes.render_into(&mut out);
         self.connections.render_into(&mut out);
         self.connections_refused.render_into(&mut out);
         self.connections_active.render_into(&mut out);

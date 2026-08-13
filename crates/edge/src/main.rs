@@ -41,12 +41,17 @@ async fn main() -> Result<()> {
     );
     for zone in &cfg.zones {
         info!(
-            "  zone {} -> {}://{} ({})",
+            "  zone {} -> {} ({})",
             zone.name,
-            zone.origin.scheme,
-            zone.origin.authority,
+            zone.origins.urls().join(", "),
             zone.hostnames.join(", ")
         );
+        if let Some(probe) = &zone.origins.probe {
+            info!(
+                "    probing {} every {:?}, out after {} failures",
+                probe.path, probe.every, zone.origins.unhealthy_after
+            );
+        }
     }
 
     let snap = Arc::new(Snapshot::new(cfg));

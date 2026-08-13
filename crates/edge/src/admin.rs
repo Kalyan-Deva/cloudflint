@@ -130,8 +130,27 @@ async fn route(
             let cfg = edge.snap.current();
             let stats = edge.store.stats();
             let (seen, dropped) = edge.analytics.counts();
+
+            /* per origin, because "the zone is fine" is not the same as "everything
+               behind it is", and a backup quietly carrying all the traffic is exactly
+               what somebody would want to notice */
+            let origins: Vec<_> = cfg
+                .zones
+                .iter()
+                .map(|z| {
+                    let backends: Vec<_> = edge
+                        .origins
+                        .report(&z.name, &z.origins)
+                        .into_iter()
+                        .map(|(origin, healthy)| json!({ "origin": origin, "healthy": healthy }))
+                        .collect();
+                    json!({ "zone": z.name, "origins": backends })
+                })
+                .collect();
+
             ok(json!({
                 "zones": cfg.zones.len(),
+                "origins": origins,
                 "cache": { "entries": stats.entries, "bytes": stats.bytes },
                 "events": { "seen": seen, "dropped": dropped },
                 "uptime_s": started.elapsed().as_secs(),
@@ -162,6 +181,17 @@ async fn route(
 fn metrics(edge: &Edge, started: Instant) -> Response<Body> {
     use crate::metrics as m;
 
+    let cfg = edge.snap.current();
+
+    /* before the render, not after: an origin that has been quietly healthy since boot
+       has never called `origin_health`, and a gauge that only appears once something has
+       gone wrong is a gauge nobody can alert on */
+    for zone in &cfg.zones {
+        for (origin, healthy) in edge.origins.report(&zone.name, &zone.origins) {
+            edge.metrics.origin_health(&zone.name, &origin, healthy);
+        }
+    }
+
     let mut body = edge.metrics.render();
 
     let stats = edge.store.stats();
@@ -178,7 +208,6 @@ fn metrics(edge: &Edge, started: Instant) -> Response<Body> {
         stats.bytes as f64,
     );
 
-    let cfg = edge.snap.current();
     m::gauge(
         &mut body,
         "cloudveil_zones",

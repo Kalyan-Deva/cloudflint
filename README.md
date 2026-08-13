@@ -22,6 +22,8 @@ Two processes and a dashboard:
 - **Rate limiting** with token buckets keyed by IP, IP+path or header, per-IP
   connection caps, read timeouts, and an adaptive tier that tightens while an origin
   is failing.
+- **Origin failover** across a pool of backends, with passive health from real traffic
+  and optional active probes.
 - **WebSockets** and other `Upgrade` connections pass through.
 - **Control plane** holding config as revisions with one-click rollback, plus
   analytics ingested from the edges.
@@ -109,10 +111,24 @@ lists:
 zones:
   - name: demo
     hostnames: [demo.local, "*.demo.local"]
-    origin:
+    origin: # one backend
       url: "http://127.0.0.1:8081" # scheme is required
       preserve_host: true
       timeout_ms: 30000
+
+    # or several, instead of `origin`, in preference order
+    origins:
+      - url: "http://127.0.0.1:8081"
+      - url: "http://127.0.0.1:8082"
+    origin_policy:
+      strategy: first_healthy # or round_robin
+      unhealthy_after: 3 # consecutive failures before it is taken out
+      retry_after_secs: 10 # how long it stays out
+      probe: # optional active checks
+        path: /healthz
+        every_secs: 10
+        timeout_ms: 2000
+        healthy_after: 2 # successes before it gets traffic again
     tls:
       cert: "certs/demo.local.crt"
       key: "certs/demo.local.key"
@@ -160,6 +176,30 @@ needs a restart.
 
 Exact hostnames beat wildcards: `*.demo.local` covers `api.demo.local` but not
 `demo.local` itself or `a.b.demo.local`.
+
+### Origins and failover
+
+A zone's `origins` are tried in health order. Passive health comes free from real traffic:
+after `unhealthy_after` consecutive failures a backend is taken out for
+`retry_after_secs`. Active `probe`s cost a request every few seconds and are the only way
+a recovered backend comes back without a user finding it first.
+
+What counts as a failure is deliberately narrow:
+
+| | |
+|---|---|
+| connection refused | failure, and the request is retried on the next origin |
+| timeout | failure, but **not** retried — the origin may be doing the work, and the client has already waited the full timeout |
+| any HTTP status, including 5xx | not a failure. The origin answered; that is its answer |
+
+A request is only retried if it can be repeated safely: an idempotent method
+(`GET`/`HEAD`/`OPTIONS`/`TRACE`) with no body. A `POST` that fails gets a 502, and the
+failure is still recorded so the *next* request goes elsewhere.
+
+When every origin looks unhealthy they are all tried anyway. Health is a guess from a
+handful of failures, and a guess that can take the whole site down is worse than no guess.
+
+Per-origin health shows up in `/admin/stats` and as `cloudveil_origin_healthy{zone,origin}`.
 
 ### Behind a load balancer
 
@@ -273,9 +313,12 @@ From the edge:
 | `cloudveil_waf_matches_total` | counter | `zone`, `rule`, `severity`, `action` |
 | `cloudveil_ratelimit_decisions_total` | counter | `zone`, `rule`, `action` |
 | `cloudveil_ratelimit_factor` | gauge | `zone` — below 1 while the adaptive tier is tightening |
-| `cloudveil_origin_requests_total` | counter | `zone` |
-| `cloudveil_origin_errors_total` | counter | `zone`, `kind` (`unreachable`/`timeout`) |
-| `cloudveil_origin_duration_seconds` | histogram | `zone` |
+| `cloudveil_origin_requests_total` | counter | `zone`, `origin` |
+| `cloudveil_origin_errors_total` | counter | `zone`, `origin`, `kind` (`unreachable`/`timeout`) |
+| `cloudveil_origin_duration_seconds` | histogram | `zone`, `origin` |
+| `cloudveil_origin_healthy` | gauge | `zone`, `origin` — 0 while taken out of rotation |
+| `cloudveil_origin_failovers_total` | counter | `zone` |
+| `cloudveil_origin_probes_total` | counter | `zone`, `origin`, `result` |
 | `cloudveil_connections_total` | counter | |
 | `cloudveil_connections_refused_total` | counter | `reason` (`too_many`/`too_fast`) |
 | `cloudveil_connections_active` | gauge | |
@@ -312,7 +355,7 @@ when stopped. There is no `cargo fmt` check: the source is formatted by hand.
 
 - Rate limit counters are per node.
 - Origin connections are HTTP/1.1.
-- One origin per zone; no health checking or failover yet.
+- Origin health is per node: each edge forms its own opinion of a backend.
 - Built and tested on Windows and Linux. The container image has not been built yet.
 
 ## Licence

@@ -212,9 +212,33 @@ async fn a_scrape_reports_what_the_request_path_did() {
     );
     assert_eq!(sample(&body, r#"cloudveil_ratelimit_factor{zone="demo"}"#), Some(1.0));
 
-    /* one origin fetch per miss - nothing for a hit, a block or a 429 */
-    assert_eq!(sample(&body, r#"cloudveil_origin_requests_total{zone="demo"}"#), Some(3.0));
-    assert_eq!(sample(&body, r#"cloudveil_origin_errors_total{zone="demo",kind="unreachable"}"#), None);
+    /* one origin fetch per miss - nothing for a hit, a block or a 429. Labelled by
+       origin as well as zone, so "which backend" is answerable */
+    assert_eq!(
+        sample(
+            &body,
+            &format!(r#"cloudveil_origin_requests_total{{zone="demo",origin="{origin}"}}"#)
+        ),
+        Some(3.0)
+    );
+    assert_eq!(
+        sample(
+            &body,
+            &format!(
+                r#"cloudveil_origin_errors_total{{zone="demo",origin="{origin}",kind="unreachable"}}"#
+            )
+        ),
+        None
+    );
+    /* and the only origin there is has been quietly healthy all along */
+    assert_eq!(
+        sample(
+            &body,
+            &format!(r#"cloudveil_origin_healthy{{zone="demo",origin="{origin}"}}"#)
+        ),
+        Some(1.0),
+        "a healthy origin needs a series too, or there is nothing to alert on:\n{body}"
+    );
 
     /* the histogram's +Inf bucket is every request that reached a zone */
     assert_eq!(
@@ -256,7 +280,12 @@ async fn a_dead_origin_shows_up_as_an_origin_error() {
 
     let (_, _, body) = scrape(admin, Some(TOKEN)).await;
     assert_eq!(
-        sample(&body, r#"cloudveil_origin_errors_total{zone="demo",kind="unreachable"}"#),
+        sample(
+            &body,
+            &format!(
+                r#"cloudveil_origin_errors_total{{zone="demo",origin="{dead}",kind="unreachable"}}"#
+            )
+        ),
         Some(1.0),
         "an unreachable origin should be an origin error, not just a 502:\n{body}"
     );

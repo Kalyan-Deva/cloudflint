@@ -72,6 +72,33 @@ zones:
       preserve_host: true
       timeout_ms: 30000
 
+    # For more than one backend, use `origins` instead of `origin` - the same fields,
+    # in preference order. A single `origin:` is just a pool of one.
+    #
+    # origins:
+    #   - url: "http://127.0.0.1:8081"
+    #   - url: "http://127.0.0.1:8082"
+    #
+    # origin_policy:
+    #   # first_healthy: earlier entries win, so this is primary-and-backups.
+    #   # round_robin: spread requests over everything healthy.
+    #   strategy: first_healthy
+    #   # Consecutive failures before a backend is taken out. One failed request is
+    #   # usually the request's fault; taking a backend out on one turns a blip into
+    #   # an outage.
+    #   unhealthy_after: 3
+    #   # How long it stays out before it is worth trying again.
+    #   retry_after_secs: 10
+    #   # Active checks. Without these a failure is only ever noticed by the request
+    #   # that hits it, and a recovered backend needs somebody to walk into it.
+    #   probe:
+    #     path: /healthz
+    #     every_secs: 10
+    #     timeout_ms: 2000
+    #     # Consecutive successes before it gets traffic again, so a flapping
+    #     # backend has to prove itself.
+    #     healthy_after: 2
+
     # Certificates are per zone and picked by SNI. Make one for local work with:
     #   cargo run -p cloudveil-edge --bin cloudveil-cert -- certs demo.local localhost
     # Edit either file and the edge reloads it without dropping a connection.

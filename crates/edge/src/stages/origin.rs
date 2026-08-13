@@ -14,11 +14,12 @@ use hyper::{header, Request, Response, StatusCode, Uri};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::body::{adapt, full, with_read_timeout, Body};
 use crate::config;
 use crate::metrics::Metrics;
+use crate::origins::Health;
 use crate::pipeline::{Ctx, Stage, StageError, Verdict};
 
 pub type HttpClient = Client<HttpConnector, Body>;
@@ -39,6 +40,9 @@ pub struct Fetcher {
     client: HttpClient,
     /// Optional so a `Fetcher` can be built in a test without a registry.
     metrics: Option<Arc<Metrics>>,
+    /// Also optional: with no registry there is nothing to fail over to either, since a
+    /// bare `Fetcher` is only used with a pool of one.
+    health: Option<Arc<Health>>,
 }
 
 impl Fetcher {
@@ -46,35 +50,111 @@ impl Fetcher {
         Self {
             client: Client::builder(TokioExecutor::new()).build_http(),
             metrics: None,
+            health: None,
         }
     }
 
-    pub fn metered(metrics: Arc<Metrics>) -> Self {
+    pub fn metered(metrics: Arc<Metrics>, health: Arc<Health>) -> Self {
         Self {
             metrics: Some(metrics),
+            health: Some(health),
             ..Self::new()
         }
     }
 
-    /// Every origin request goes through here - the cache's background revalidations
-    /// as well as the terminal stage's - which makes it the only place that sees all
-    /// of them. The zone is passed in because an `Origin` doesn't know its own name.
+    /// Every origin request goes through here - the cache's background revalidations as
+    /// well as the terminal stage's - which makes it the only place that sees all of
+    /// them, and so the only sensible place to judge whether a backend is alive.
+    ///
+    /// Tries the pool in health order. A backend that refuses the connection is worth
+    /// stepping over immediately; one that *times out* is not, because it may well be
+    /// doing the work, and a client already waiting the full timeout should not be made
+    /// to wait for a second one.
     pub async fn fetch(
         &self,
         zone: &str,
-        origin: &config::Origin,
+        pool: &config::OriginPool,
         host: &str,
         peer: SocketAddr,
         tls: bool,
         req: Request<Body>,
     ) -> Result<Response<Body>, StageError> {
-        let started = Instant::now();
-        let out = self.send(origin, host, peer, tls, req).await;
+        let candidates = match &self.health {
+            Some(health) => health.candidates(zone, pool),
+            None => (0..pool.origins.len()).collect(),
+        };
 
-        if let Some(metrics) = &self.metrics {
-            metrics.origin_call(zone, started.elapsed(), kind_of(&out));
+        /* captured before the first attempt, because sending consumes the request */
+        let replay = replayable(&req);
+        let mut req = Some(req);
+        let mut last: Option<StageError> = None;
+
+        for (attempt, &index) in candidates.iter().enumerate() {
+            let origin = &pool.origins[index];
+            let Some(sending) = req.take().or_else(|| replay.as_ref().map(rebuild)) else {
+                /* nothing safe to send twice - the failure stands, and the health note
+                   already recorded means the *next* request goes elsewhere */
+                break;
+            };
+
+            let started = Instant::now();
+            let out = self.send(origin, host, peer, tls, sending).await;
+            let kind = kind_of(&out);
+
+            let authority = origin.authority.as_str();
+            if let Some(metrics) = &self.metrics {
+                metrics.origin_call(zone, authority, started.elapsed(), kind);
+                if attempt > 0 {
+                    metrics.failover(zone);
+                }
+            }
+            if let Some(health) = &self.health {
+                match kind {
+                    None => health.record_success(zone, origin, pool.healthy_after()),
+                    Some(_) => health.record_failure(zone, origin, pool),
+                }
+                if let Some(metrics) = &self.metrics {
+                    metrics.origin_health(zone, authority, health.is_healthy(zone, origin));
+                }
+            }
+
+            match out {
+                Ok(resp) => return Ok(resp),
+                Err(e) => {
+                    /* a timeout is terminal: see the note above */
+                    if kind != Some("unreachable") {
+                        return Err(e);
+                    }
+                    if candidates.len() > 1 && attempt + 1 < candidates.len() {
+                        warn!(
+                            "zone {zone}: origin {} unreachable, trying the next one",
+                            origin.authority
+                        );
+                    }
+                    last = Some(e);
+                }
+            }
         }
-        out
+
+        Err(last.unwrap_or_else(|| {
+            StageError::new(
+                StatusCode::BAD_GATEWAY,
+                "502 no origin could be reached".to_string(),
+            )
+        }))
+    }
+
+    /// One request to one origin, with no pool, no health and no retry. The prober uses
+    /// this: a health check that failed over would never find anything unhealthy.
+    pub async fn send_direct(
+        &self,
+        origin: &config::Origin,
+        host: &str,
+        req: Request<Body>,
+    ) -> Result<Response<Body>, StageError> {
+        /* the probe is not forwarding anyone's request, so there is no peer to record */
+        let nowhere: SocketAddr = ([127, 0, 0, 1], 0).into();
+        self.send(origin, host, nowhere, false, req).await
     }
 
     async fn send(
@@ -170,6 +250,53 @@ fn kind_of(out: &Result<Response<Body>, StageError>) -> Option<&'static str> {
     }
 }
 
+/// Everything needed to send the same request again somewhere else.
+struct Head {
+    method: hyper::Method,
+    uri: Uri,
+    version: hyper::Version,
+    headers: HeaderMap,
+}
+
+/// Whether this request could be sent to a second origin at all.
+///
+/// Two hurdles, and both matter. **Idempotence**: replaying a POST that may already have
+/// been received would charge somebody's card twice, so only methods defined as
+/// idempotent qualify. **A body we still have**: our bodies are streams, and once one
+/// has been read towards the first origin it is gone - so only a request with no body can
+/// be repeated. That is nearly all traffic a failover is for, and refusing to guess about
+/// the rest is the honest limit rather than a gap. An upgrade is excluded outright: the
+/// whole point of it is the connection it happens on.
+fn replayable(req: &Request<Body>) -> Option<Head> {
+    /* for size_hint, which is on the Body trait rather than the extension trait */
+    use hyper::body::Body as _;
+    use hyper::Method;
+
+    let idempotent = matches!(
+        *req.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE
+    );
+    let bodyless = req.body().size_hint().exact() == Some(0);
+
+    (idempotent && bodyless && !is_upgrade(req.headers())).then(|| Head {
+        method: req.method().clone(),
+        uri: req.uri().clone(),
+        version: req.version(),
+        headers: req.headers().clone(),
+    })
+}
+
+fn rebuild(head: &Head) -> Request<Body> {
+    /* http::request::Parts is not Clone and has no public constructor, so borrow one
+       from a throwaway request and fill it in */
+    let (mut parts, _) = Request::new(()).into_parts();
+    parts.method = head.method.clone();
+    parts.uri = head.uri.clone();
+    parts.version = head.version;
+    parts.headers = head.headers.clone();
+    Request::from_parts(parts, full(""))
+}
+
 pub struct Origin {
     fetcher: Arc<Fetcher>,
 }
@@ -197,7 +324,7 @@ impl Stage for Origin {
             .fetcher
             .fetch(
                 &ctx.zone.name,
-                &ctx.zone.origin,
+                &ctx.zone.origins,
                 &ctx.host,
                 ctx.peer,
                 ctx.tls,

@@ -12,6 +12,7 @@ pub mod cp;
 pub mod limits;
 pub mod logging;
 pub mod metrics;
+pub mod origins;
 pub mod pages;
 pub mod pipeline;
 pub mod proxy;
@@ -56,6 +57,8 @@ pub struct Edge {
     pub analytics: Arc<analytics::Sink>,
     pub metrics: Arc<Metrics>,
     pub shutdown: Arc<Shutdown>,
+    /// What we think of each zone's backends. Outlives config reloads on purpose.
+    pub origins: Arc<origins::Health>,
     pub tls: Option<Arc<Tls>>,
     pipeline: Arc<Pipeline>,
     node: NodeLimits,
@@ -74,8 +77,19 @@ impl Edge {
         ));
         let analytics = analytics::Sink::new(boot.control_plane.clone());
         let metrics = Arc::new(Metrics::new());
-        let pipeline = Arc::new(stages::build(store.clone(), metrics.clone()));
+        let origins = origins::Health::new();
+        let fetcher = Arc::new(stages::origin::Fetcher::metered(
+            metrics.clone(),
+            origins.clone(),
+        ));
+        let pipeline = Arc::new(stages::build(store.clone(), metrics.clone(), fetcher.clone()));
         let node = boot.limits;
+
+        /* only if some zone actually asks for probes - a zone with one origin and no
+           probe config should cost nothing */
+        if boot.zones.iter().any(|z| z.origins.probe.is_some()) {
+            origins::spawn_probes(snap.clone(), origins.clone(), fetcher, metrics.clone());
+        }
 
         Arc::new(Edge {
             snap,
@@ -83,6 +97,7 @@ impl Edge {
             analytics,
             metrics,
             shutdown: Shutdown::new(),
+            origins,
             tls,
             pipeline,
             node,

@@ -75,7 +75,7 @@ pub struct StoreConfig {
 pub struct Zone {
     pub name: String,
     pub hostnames: Vec<String>, /* normalized, may start with "*." */
-    pub origin: Origin,
+    pub origins: OriginPool,
     pub waf: WafPolicy,
     pub cache: CachePolicy,
     pub rate_limits: Vec<RateRule>,
@@ -107,13 +107,67 @@ pub struct Origin {
     pub timeout: Duration,
 }
 
+/// A zone's backends, in the order they should be tried, plus what to do when one of
+/// them stops answering. A single `origin:` in config becomes a pool of one, so there is
+/// only ever one code path on the request side.
+#[derive(Debug, Clone)]
+pub struct OriginPool {
+    /// Never empty. Order is meaningful for `FirstHealthy`.
+    pub origins: Vec<Origin>,
+    pub strategy: Strategy,
+    /// Consecutive failures before an origin is taken out of rotation.
+    pub unhealthy_after: u32,
+    /// How long it stays out before it is worth trying again.
+    pub retry_after: Duration,
+    /// Active health checks. None means passive only - failures are noticed by the
+    /// requests that hit them.
+    pub probe: Option<ProbeConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Strategy {
+    /// Earlier origins are preferred: a primary with backups behind it.
+    #[default]
+    FirstHealthy,
+    /// Spread requests across everything healthy.
+    RoundRobin,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProbeConfig {
+    pub path: String,
+    pub every: Duration,
+    /// The probe's own timeout, deliberately shorter than a request's.
+    pub timeout: Duration,
+    /// Consecutive probe successes before a dead origin is used again.
+    pub healthy_after: u32,
+}
+
+impl OriginPool {
+    /// The single origin, for the many places that only ever have one.
+    pub fn first(&self) -> &Origin {
+        &self.origins[0]
+    }
+
+    pub fn healthy_after(&self) -> u32 {
+        self.probe.as_ref().map(|p| p.healthy_after).unwrap_or(1)
+    }
+
+    pub fn urls(&self) -> Vec<String> {
+        self.origins
+            .iter()
+            .map(|o| format!("{}://{}", o.scheme, o.authority))
+            .collect()
+    }
+}
+
 impl std::fmt::Debug for Zone {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         /* compiled rules are closures, so print the count instead */
         f.debug_struct("Zone")
             .field("name", &self.name)
             .field("hostnames", &self.hostnames)
-            .field("origin", &self.origin)
+            .field("origins", &self.origins)
             .field("waf_rules", &self.waf.rules.len())
             .field("cache", &self.cache.enabled)
             .field("rate_limits", &self.rate_limits.len())
@@ -157,7 +211,7 @@ pub fn parse(text: &str) -> Result<Config> {
             bail!("zone `{}` has no hostnames", z.name);
         }
         zones.push(Zone {
-            origin: origin_from(&z.name, z.origin)?,
+            origins: pool_from(&z.name, z.origin, z.origins, z.origin_policy)?,
             waf: waf_from(&z.name, z.waf, &raw.lists)?,
             cache: cache_from(&z.name, z.cache)?,
             rate_limits: rate_limits_from(&z.name, z.rate_limits, &raw.lists)?,
@@ -365,6 +419,85 @@ fn origin_from(zone: &str, o: raw::Origin) -> Result<Origin> {
     })
 }
 
+/// `origin:` for one backend, `origins:` for several. Both end up as a pool, so the
+/// request path never has two shapes to handle.
+fn pool_from(
+    zone: &str,
+    one: Option<raw::Origin>,
+    many: Option<Vec<raw::Origin>>,
+    policy: Option<raw::OriginPolicy>,
+) -> Result<OriginPool> {
+    let raw_origins = match (one, many) {
+        (Some(_), Some(_)) => bail!(
+            "zone `{zone}`: give either `origin` for one backend or `origins` for several, not both"
+        ),
+        (Some(one), None) => vec![one],
+        (None, Some(many)) if many.is_empty() => {
+            bail!("zone `{zone}`: `origins` is empty - a zone needs somewhere to send traffic")
+        }
+        (None, Some(many)) => many,
+        (None, None) => bail!("zone `{zone}`: no origin"),
+    };
+
+    let mut origins = Vec::with_capacity(raw_origins.len());
+    for raw in raw_origins {
+        let origin = origin_from(zone, raw)?;
+        /* two entries for the same backend would share one health state and give it a
+           double share of the traffic, neither of which anybody means to ask for */
+        if origins
+            .iter()
+            .any(|o: &Origin| o.authority == origin.authority && o.scheme == origin.scheme)
+        {
+            bail!("zone `{zone}`: origin `{}` is listed twice", origin.authority);
+        }
+        origins.push(origin);
+    }
+
+    let policy = policy.unwrap_or_default();
+    let strategy = match policy.strategy.as_str() {
+        "first_healthy" => Strategy::FirstHealthy,
+        "round_robin" => Strategy::RoundRobin,
+        other => bail!(
+            "zone `{zone}`: origin strategy `{other}` (have: first_healthy, round_robin)"
+        ),
+    };
+    if policy.unhealthy_after == 0 {
+        bail!("zone `{zone}`: origin_policy.unhealthy_after must be > 0, or nothing is ever taken out");
+    }
+
+    let probe = match policy.probe {
+        None => None,
+        Some(p) => {
+            if !p.path.starts_with('/') {
+                bail!("zone `{zone}`: probe path `{}` must start with /", p.path);
+            }
+            if p.every_secs == 0 {
+                bail!("zone `{zone}`: probe every_secs must be > 0");
+            }
+            if p.timeout_ms == 0 {
+                bail!("zone `{zone}`: probe timeout_ms must be > 0");
+            }
+            if p.healthy_after == 0 {
+                bail!("zone `{zone}`: probe healthy_after must be > 0, or nothing ever recovers");
+            }
+            Some(ProbeConfig {
+                path: p.path,
+                every: Duration::from_secs(p.every_secs),
+                timeout: Duration::from_millis(p.timeout_ms),
+                healthy_after: p.healthy_after,
+            })
+        }
+    };
+
+    Ok(OriginPool {
+        origins,
+        strategy,
+        unhealthy_after: policy.unhealthy_after,
+        retry_after: Duration::from_secs(policy.retry_after_secs),
+        probe,
+    })
+}
+
 /// Lowercase, drop the port and any trailing root dot. Handles `[::1]:8080`.
 fn normalize_host(h: &str) -> String {
     let h = h.trim();
@@ -506,7 +639,14 @@ mod raw {
     pub struct Zone {
         pub name: String,
         pub hostnames: Vec<String>,
-        pub origin: Origin,
+        /// One backend. Exactly one of this and `origins` is required.
+        #[serde(default)]
+        pub origin: Option<Origin>,
+        /// Several, in preference order.
+        #[serde(default)]
+        pub origins: Option<Vec<Origin>>,
+        #[serde(default)]
+        pub origin_policy: Option<OriginPolicy>,
         #[serde(default)]
         pub waf: Waf,
         #[serde(default)]
@@ -517,6 +657,44 @@ mod raw {
         pub adaptive: Adaptive,
         #[serde(default)]
         pub tls: Option<TlsPaths>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct OriginPolicy {
+        /// first_healthy | round_robin
+        #[serde(default = "default_strategy")]
+        pub strategy: String,
+        #[serde(default = "default_unhealthy_after")]
+        pub unhealthy_after: u32,
+        #[serde(default = "default_retry_after")]
+        pub retry_after_secs: u64,
+        #[serde(default)]
+        pub probe: Option<Probe>,
+    }
+
+    impl Default for OriginPolicy {
+        fn default() -> Self {
+            OriginPolicy {
+                strategy: default_strategy(),
+                unhealthy_after: default_unhealthy_after(),
+                retry_after_secs: default_retry_after(),
+                probe: None,
+            }
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Probe {
+        #[serde(default = "default_probe_path")]
+        pub path: String,
+        #[serde(default = "default_probe_every")]
+        pub every_secs: u64,
+        #[serde(default = "default_probe_timeout")]
+        pub timeout_ms: u64,
+        #[serde(default = "default_healthy_after")]
+        pub healthy_after: u32,
     }
 
     #[derive(Deserialize)]
@@ -726,6 +904,30 @@ mod raw {
     fn default_client_ip_header() -> String {
         crate::client_ip::DEFAULT_HEADER.to_string()
     }
+    fn default_strategy() -> String {
+        "first_healthy".to_string()
+    }
+    /// Three, not one: a single failed request is usually the request's fault, and
+    /// taking a backend out on one is how a blip becomes an outage.
+    fn default_unhealthy_after() -> u32 {
+        3
+    }
+    fn default_retry_after() -> u64 {
+        10
+    }
+    fn default_probe_path() -> String {
+        "/".to_string()
+    }
+    fn default_probe_every() -> u64 {
+        10
+    }
+    fn default_probe_timeout() -> u64 {
+        2_000
+    }
+    /// Two, so a backend that is flapping has to answer twice before it gets traffic.
+    fn default_healthy_after() -> u32 {
+        2
+    }
     fn default_key() -> String {
         "ip".to_string()
     }
@@ -779,9 +981,12 @@ zones:
         let cfg = parse(SAMPLE).unwrap();
         assert_eq!(cfg.listen.port(), 9000);
         assert_eq!(cfg.zones[0].hostnames, vec!["demo.local", "*.demo.local"]);
-        assert!(cfg.zones[0].origin.preserve_host);
-        assert_eq!(cfg.zones[1].origin.scheme, Scheme::HTTPS);
-        assert_eq!(cfg.zones[1].origin.timeout, Duration::from_millis(1500));
+        assert!(cfg.zones[0].origins.first().preserve_host);
+        assert_eq!(cfg.zones[1].origins.first().scheme, Scheme::HTTPS);
+        assert_eq!(cfg.zones[1].origins.first().timeout, Duration::from_millis(1500));
+        /* a single `origin:` is a pool of one, so the request path has one shape */
+        assert_eq!(cfg.zones[0].origins.origins.len(), 1);
+        assert_eq!(cfg.zones[0].origins.strategy, Strategy::FirstHealthy);
     }
 
     #[test]
