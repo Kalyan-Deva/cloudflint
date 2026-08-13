@@ -1,6 +1,7 @@
-﻿//! Cloudflint edge - the data plane. Everything in here sits in the request path,
+//! Cloudflint edge - the data plane. Everything in here sits in the request path,
 //! so it stays free of database calls and blocking work.
 
+pub mod acme;
 pub mod admin;
 pub mod analytics;
 pub mod auth;
@@ -61,6 +62,8 @@ pub struct Edge {
     pub shutdown: Arc<Shutdown>,
     /// What we think of each zone's backends. Outlives config reloads on purpose.
     pub origins: Arc<origins::Health>,
+    /// ACME http-01 answers, checked before routing - see `proxy::handle`.
+    pub challenges: Arc<acme::Challenges>,
     pub tls: Option<Arc<Tls>>,
     pipeline: Arc<Pipeline>,
     node: NodeLimits,
@@ -100,6 +103,7 @@ impl Edge {
             metrics,
             shutdown: Shutdown::new(),
             origins,
+            challenges: acme::Challenges::new(),
             tls,
             pipeline,
             node,
@@ -286,6 +290,7 @@ pub async fn serve_redirect(
     listener: TcpListener,
     https_port: u16,
     shutdown: Arc<Shutdown>,
+    challenges: Arc<acme::Challenges>,
 ) -> Result<()> {
     loop {
         let accepted = tokio::select! {
@@ -298,11 +303,27 @@ pub async fn serve_redirect(
             continue;
         };
         let token = shutdown.token();
+        let challenges = challenges.clone();
 
         tokio::spawn(async move {
             let _token = token;
             let io = TokioIo::new(stream);
-            let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| async move {
+            let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                let challenges = challenges.clone();
+                async move {
+                /* an acme challenge must be answered here rather than redirected: the
+                   certificate the redirect points at is the one we are trying to get, so
+                   sending the CA to https would be a circle it cannot get out of */
+                if let Some(answer) = challenges.for_path(req.uri().path()) {
+                    return Ok::<_, std::convert::Infallible>(
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header(hyper::header::CONTENT_TYPE, "text/plain")
+                            .body(full(answer))
+                            .expect("a challenge answer is always valid"),
+                    );
+                }
+
                 let host = req
                     .headers()
                     .get(hyper::header::HOST)
@@ -321,6 +342,7 @@ pub async fn serve_redirect(
                     .body(full(""))
                     .expect("redirect is always valid");
                 Ok::<_, std::convert::Infallible>(resp)
+                }
             });
 
             if let Err(e) = hyper::server::conn::http1::Builder::new()

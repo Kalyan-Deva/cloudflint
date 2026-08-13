@@ -34,7 +34,33 @@ pub struct Config {
     pub client_ip: ClientIp,
     /// None means plaintext only.
     pub tls: Option<TlsConfig>,
+    /// Where to get certificates automatically. None means every certificate is somebody
+    /// else's problem, which is the default.
+    pub acme: Option<AcmeConfig>,
     pub zones: Vec<Zone>,
+}
+
+/// One ACME server, for the whole node.
+#[derive(Debug, Clone)]
+pub struct AcmeConfig {
+    pub directory: String,
+    /// Where the CA writes to about expiry and problems. Optional, and worth setting.
+    pub contact: Option<String>,
+    /// The account key *is* the account, so this file is the thing to keep.
+    pub account_key: PathBuf,
+    /// Renew once a certificate has this many days left. Let's Encrypt issues for 90 and
+    /// recommends 30, which leaves two more windows to get it right.
+    pub renew_before_days: u32,
+    pub check_every: Duration,
+    /// How long to wait for a challenge or an order to go valid.
+    pub timeout: Duration,
+    /// A CA to trust for the ACME server itself, for a staging server that is not
+    /// publicly trusted. Not for skipping verification - there is no option for that.
+    pub ca: Option<PathBuf>,
+    /// The issuance profile to ask for, when a server offers several and they differ in
+    /// how long the certificate lasts. None sends nothing, which is right for a CA that
+    /// has no profiles.
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +111,9 @@ pub struct Zone {
     pub rate_limits: Vec<RateRule>,
     pub adaptive: Adaptive,
     pub tls: Option<TlsPaths>,
+    /// Let ACME keep the files in `tls` up to date. Deliberately a flag on the existing
+    /// block rather than a second place certificates can come from.
+    pub acme: bool,
 }
 
 /// A zone's compiled rules plus the knobs around them.
@@ -280,6 +309,7 @@ pub fn parse(text: &str) -> Result<Config> {
             compression: compression_from(&z.name, z.compression)?,
             rate_limits: rate_limits_from(&z.name, z.rate_limits, &raw.lists)?,
             adaptive: adaptive_from(&z.name, z.adaptive)?,
+            acme: z.tls.as_ref().map(|t| t.acme).unwrap_or(false),
             tls: z.tls.map(|t| TlsPaths {
                 cert: PathBuf::from(t.cert),
                 key: PathBuf::from(t.key),
@@ -316,6 +346,7 @@ pub fn parse(text: &str) -> Result<Config> {
             handshake_timeout: Duration::from_millis(t.handshake_timeout_ms),
             redirect_http: t.redirect_http,
         }),
+        acme: acme_from(raw.acme, &zones)?,
         zones,
     })
 }
@@ -488,6 +519,48 @@ fn origin_from(zone: &str, o: raw::Origin) -> Result<Origin> {
     })
 }
 
+fn acme_from(raw: Option<raw::Acme>, zones: &[Zone]) -> Result<Option<AcmeConfig>> {
+    let Some(raw) = raw else {
+        /* a zone asking for acme with no acme server named is a config that looks like it
+           will get certificates and never will */
+        if let Some(zone) = zones.iter().find(|z| z.acme) {
+            bail!(
+                "zone `{}` sets tls.acme but there is no top-level `acme` block naming a server",
+                zone.name
+            );
+        }
+        return Ok(None);
+    };
+
+    if !raw.directory.starts_with("https://") && !raw.directory.starts_with("http://") {
+        bail!("acme.directory `{}` needs a scheme", raw.directory);
+    }
+    if raw.renew_before_days == 0 {
+        bail!("acme.renew_before_days must be > 0, or a certificate is only renewed once it has expired");
+    }
+    if raw.check_every_secs == 0 {
+        bail!("acme.check_every_secs must be > 0");
+    }
+    if let Some(contact) = &raw.contact {
+        /* the CA will reject anything else, and finding that out at issuance time is a
+           slower way to learn it */
+        if !contact.starts_with("mailto:") {
+            bail!("acme.contact `{contact}` should be a mailto: address");
+        }
+    }
+
+    Ok(Some(AcmeConfig {
+        directory: raw.directory,
+        contact: raw.contact,
+        account_key: PathBuf::from(raw.account_key),
+        renew_before_days: raw.renew_before_days,
+        check_every: Duration::from_secs(raw.check_every_secs),
+        timeout: Duration::from_secs(raw.timeout_secs),
+        ca: raw.ca.map(PathBuf::from),
+        profile: raw.profile,
+    }))
+}
+
 fn origin_tls_from(zone: &str, t: raw::OriginTls) -> Result<OriginTls> {
     /* a certificate without its key would fail at handshake time, on a request, in
        production. it is a typo, and a typo should not wait that long to be a problem */
@@ -656,7 +729,30 @@ mod raw {
         pub client_ip: ClientIp,
         #[serde(default)]
         pub tls: Option<Tls>,
+        #[serde(default)]
+        pub acme: Option<Acme>,
         pub zones: Vec<Zone>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Acme {
+        pub directory: String,
+        #[serde(default)]
+        pub contact: Option<String>,
+        #[serde(default = "default_account_key")]
+        pub account_key: String,
+        #[serde(default = "default_renew_before")]
+        pub renew_before_days: u32,
+        #[serde(default = "default_acme_check")]
+        pub check_every_secs: u64,
+        #[serde(default = "default_acme_timeout")]
+        pub timeout_secs: u64,
+        #[serde(default)]
+        pub ca: Option<String>,
+        /// Only sent if set. See `AcmeConfig::profile`.
+        #[serde(default)]
+        pub profile: Option<String>,
     }
 
     #[derive(Deserialize)]
@@ -693,6 +789,9 @@ mod raw {
     pub struct TlsPaths {
         pub cert: String,
         pub key: String,
+        /// Keep these two files up to date automatically. See the `acme` block.
+        #[serde(default)]
+        pub acme: bool,
     }
 
     #[derive(Deserialize)]
@@ -1006,6 +1105,22 @@ mod raw {
     }
     fn default_weight() -> u32 {
         1
+    }
+    fn default_account_key() -> String {
+        "certs/acme-account.key".to_string()
+    }
+    /// Let's Encrypt issues for 90 days and suggests renewing at 30, which leaves two more
+    /// chances if the first attempt fails.
+    fn default_renew_before() -> u32 {
+        30
+    }
+    /// Twice a day. Renewal is not urgent and a CA's rate limits are, so there is nothing
+    /// to gain from looking more often.
+    fn default_acme_check() -> u64 {
+        12 * 3600
+    }
+    fn default_acme_timeout() -> u64 {
+        90
     }
     fn default_timeout_ms() -> u64 {
         30_000

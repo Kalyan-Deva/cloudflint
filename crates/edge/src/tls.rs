@@ -1,4 +1,4 @@
-﻿//! TLS termination.
+//! TLS termination.
 //!
 //! Certificates are named by the config but loaded here, not in `config::parse`.
 //! That keeps parsing pure: the control plane validates config it was handed without
@@ -93,7 +93,7 @@ fn describe(zone: &str, path: &Path, der: &CertificateDer<'_>) -> Option<CertInf
             .unwrap_or_else(|| n.to_string())
     };
 
-    let dns_names = parsed
+    let dns_names: Vec<String> = parsed
         .subject_alternative_name()
         .ok()
         .flatten()
@@ -109,11 +109,16 @@ fn describe(zone: &str, path: &Path, der: &CertificateDer<'_>) -> Option<CertInf
         })
         .unwrap_or_default();
 
-    let subject = name(parsed.subject());
     let issuer = name(parsed.issuer());
+    /* a modern CA issues with an empty subject - the names live in the SAN extension and a
+       CN is deprecated - so fall back to the first name rather than showing a blank */
+    let subject = match name(parsed.subject()) {
+        empty if empty.is_empty() => dns_names.first().cloned().unwrap_or_default(),
+        cn => cn,
+    };
     Some(CertInfo {
         zone: zone.to_owned(),
-        self_signed: subject == issuer,
+        self_signed: !subject.is_empty() && subject == issuer,
         subject,
         issuer,
         dns_names,
@@ -190,7 +195,14 @@ impl Tls {
         }
         let certs = load(cfg).context("loading certificates")?;
         if certs.exact.is_empty() && certs.wildcards.is_empty() {
-            bail!("tls is configured but no zone has a cert and key");
+            /* an acme zone has no certificate until the first one is issued, and that
+               cannot happen if the process refuses to start without it. The https listener
+               fails handshakes until a certificate turns up, which the watcher then picks
+               up on its own - the wrong-looking state is temporary and self-healing */
+            if !cfg.zones.iter().any(|z| z.acme) {
+                bail!("tls is configured but no zone has a cert and key");
+            }
+            warn!("no certificates yet - https will not work until acme has issued one");
         }
 
         let resolver = Arc::new(SniResolver::new(certs));
@@ -302,6 +314,18 @@ fn load(cfg: &Config) -> Result<Certs> {
 
     for zone in &cfg.zones {
         let Some(paths) = &zone.tls else { continue };
+
+        /* a missing file is a config error for a certificate somebody installed, and
+           simply "not yet" for one acme is about to fetch */
+        if zone.acme && !paths.cert.exists() {
+            info!(
+                "zone {}: no certificate at {} yet, waiting for acme",
+                zone.name,
+                paths.cert.display()
+            );
+            continue;
+        }
+
         let key = load_pair(&paths.cert, &paths.key)
             .with_context(|| format!("zone `{}`", zone.name))?;
 

@@ -36,6 +36,24 @@ limits:
   # this long. Kubernetes' own grace period is 30s, so match it or lower it.
   drain_timeout_secs: 30
 
+# Automatic certificates. Leave this out and every certificate is one you installed.
+# A zone opts in with `acme: true` on its own tls block, below.
+# acme:
+#   directory: "https://acme-v02.api.letsencrypt.org/directory"
+#   # For trying it out. Staging has far looser rate limits and issues untrusted certs:
+#   # directory: "https://acme-staging-v02.api.letsencrypt.org/directory"
+#   contact: "mailto:ops@example.com"
+#   # The account key *is* the account. Keep this file.
+#   account_key: "certs/acme-account.key"
+#   renew_before_days: 30
+#   check_every_secs: 43200
+#   timeout_secs: 90
+#   # A CA to trust for the acme server itself, e.g. a local Pebble. Not a way to skip
+#   # verification - there isn't one.
+#   # ca: "pebble/test/certs/pebble.minica.pem"
+#   # Only if your CA offers profiles and you care which one.
+#   # profile: default
+
 # Who the client is, when something sits in front of this node. Everything per-client
 # keys on this: rate limit buckets, ip.src rules, the live log.
 #
@@ -111,6 +129,9 @@ zones:
     tls:
       cert: "certs/demo.local.crt"
       key: "certs/demo.local.key"
+      # Have acme keep those two files up to date. Needs the `acme` block above, and a
+      # hostname a certificate authority can actually reach on port 80.
+      # acme: true
 
     # The whole waf block is optional. Leave it out and the zone still gets the
     # core ruleset - a waf you have to remember to switch on is a waf that is off.

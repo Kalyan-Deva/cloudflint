@@ -199,11 +199,10 @@ fn certificates(edge: &Edge) -> serde_json::Value {
             json!({
                 "zone": zone.name,
                 "hostnames": zone.hostnames,
-                /* manual until acme lands; the field exists so the answer has a place
-                   to change rather than a shape to change */
-                "mode": match zone.tls.is_some() {
-                    true => "manual",
-                    false => "off",
+                "mode": match (zone.tls.is_some(), zone.acme) {
+                    (true, true) => "acme",
+                    (true, false) => "manual",
+                    (false, _) => "off",
                 },
                 "configured": zone.tls.as_ref().map(|t| t.cert.display().to_string()),
                 /* the load-bearing one: config naming a certificate is not the same as
@@ -220,10 +219,18 @@ fn certificates(edge: &Edge) -> serde_json::Value {
                 "not_before_ms": cert.map(|c| c.not_before_ms),
                 "not_after_ms": cert.map(|c| c.not_after_ms),
                 "days_left": cert.map(|c| c.days_left()),
-                /* nothing renews these yet, and saying so is better than an empty field
-                   somebody reads as "soon" */
-                "renews_at_ms": serde_json::Value::Null,
-                "renewal": "manual",
+                /* when the renewal task will act, which is a date rather than a promise:
+                   expiry minus the window, not "some time before it runs out" */
+                "renews_at_ms": match (zone.acme, cert, &cfg.acme) {
+                    (true, Some(c), Some(acme)) => Some(
+                        c.not_after_ms - acme.renew_before_days as i64 * 86_400_000,
+                    ),
+                    _ => None,
+                },
+                "renewal": match zone.acme {
+                    true => "automatic",
+                    false => "manual",
+                },
                 "origin": {
                     "https": https_origin,
                     "verify": origin_tls.verify,
@@ -245,6 +252,7 @@ fn certificates(edge: &Edge) -> serde_json::Value {
             "listen": t.listen.to_string(),
             "redirect_http": t.redirect_http,
         })),
+        "acme": crate::acme::report(&cfg, &edge.challenges),
         "zones": zones,
     })
 }

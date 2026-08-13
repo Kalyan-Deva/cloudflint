@@ -23,6 +23,8 @@ Two processes and a dashboard:
   hot certificate reload, and an optional HTTP→HTTPS redirect listener.
 - **HTTPS to the origin** with certificate validation on by default, per-zone trust for an
   internal CA, and optional client certificates for origin mTLS.
+- **ACME** certificates: issued on first start, renewed on a timer, hot-swapped in without
+  dropping a connection.
 - **WAF** with an expression language, compiled to closures at config load. Two
   rulesets ship embedded: `core` (head-only) and `core-body` (opt-in).
 - **Cache** with request coalescing, stale-while-revalidate, stale-if-error, and purge
@@ -111,6 +113,13 @@ limits: # node-wide, applied at accept time
   max_connection_age_secs: 300
   drain_timeout_secs: 30
 
+acme: # optional; without it every certificate is somebody else's problem
+  directory: "https://acme-v02.api.letsencrypt.org/directory"
+  contact: "mailto:ops@example.com"
+  account_key: "certs/acme-account.key"
+  renew_before_days: 30
+  check_every_secs: 43200
+
 client_ip: # who the client is when something sits in front of this node
   header: x-forwarded-for
   trusted_proxies: [] # empty (the default) means the header is never read
@@ -143,6 +152,7 @@ zones:
     tls: # this zone's certificate, for clients
       cert: "certs/demo.local.crt"
       key: "certs/demo.local.key"
+      acme: true # keep those two files current automatically
 
     origin_tls: # how we talk to an https:// origin
       verify: true # on by default; false is per zone and logged every time
@@ -199,6 +209,30 @@ needs a restart.
 
 Exact hostnames beat wildcards: `*.demo.local` covers `api.demo.local` but not
 `demo.local` itself or `a.b.demo.local`.
+
+### Automatic certificates
+
+Name an `acme` server and set `acme: true` on a zone's `tls` block, and that zone's
+certificate is issued on first start and renewed on a timer. There is no second place
+certificates live: ACME writes the files the `tls` block already points at, and the
+certificate watcher swaps them in within seconds — no restart, no dropped connections.
+
+- **http-01 only.** The challenge is answered on the plaintext listener, before routing,
+  and the HTTP→HTTPS redirect listener answers it too rather than redirecting — the
+  certificate a redirect would point at is the one being fetched. Wildcard hostnames are
+  skipped with a warning, because http-01 cannot do them.
+- Nothing is served for an ACME zone until its first certificate arrives; the edge starts
+  anyway and says so, because refusing to start is how a zone never gets one.
+- `renew_before_days` (default 30) is checked every `check_every_secs` (default 12h).
+  Issuance and renewal are the same operation — a missing certificate is one with no days
+  left.
+- `ca` trusts a private CA **for the ACME server itself**, which is how a staging server
+  like Pebble is used. There is no option to skip verification.
+- `profile` is only sent if you set it, for a CA that offers several and issues different
+  validity for each.
+
+The account key is the account. Keep `account_key`; losing it means a new account, not a
+lost certificate.
 
 ### HTTPS to the origin
 

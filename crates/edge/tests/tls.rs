@@ -153,8 +153,9 @@ async fn start(redirect: bool) -> Running {
     if redirect {
         let port = https_addr.port();
         let shutdown = edge.shutdown.clone();
+        let challenges = edge.challenges.clone();
         tokio::spawn(async move {
-            let _ = serve_redirect(http, port, shutdown).await;
+            let _ = serve_redirect(http, port, shutdown, challenges).await;
         });
     } else {
         let edge = edge.clone();

@@ -68,6 +68,8 @@ async fn main() -> Result<()> {
     if let Some(tls) = &tls {
         tls::watch(tls.clone(), snap.clone(), std::time::Duration::from_secs(5));
     }
+    /* and acme keeps those files current, which is why it needs nothing else wired to it */
+    cloudflint_edge::acme::spawn(snap.clone(), edge.challenges.clone());
 
     match &control_plane {
         Some(url) => {
@@ -116,8 +118,9 @@ async fn main() -> Result<()> {
             let listener = plaintext.take().expect("the plaintext listener is still here");
             let port = tls_cfg.listen.port();
             let shutdown = edge.shutdown.clone();
+            let challenges = edge.challenges.clone();
             tokio::spawn(async move {
-                if let Err(e) = serve_redirect(listener, port, shutdown).await {
+                if let Err(e) = serve_redirect(listener, port, shutdown, challenges).await {
                     tracing::error!("redirect listener stopped: {e}");
                 }
             });

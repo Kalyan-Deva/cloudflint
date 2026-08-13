@@ -41,6 +41,15 @@ pub async fn handle(
     let path = req.uri().path().to_owned();
     let host = host_of(&req).unwrap_or_default();
 
+    /* before routing, before the waf, before anything: a certificate authority checking
+       an http-01 challenge is not really a visitor to a zone, and the request has to be
+       answered even when no zone matches the name yet - which is the usual case, because
+       the whole point is that the certificate does not exist */
+    if let Some(answer) = edge.challenges.for_path(&path) {
+        info!("{} {method} {path} -> 200 [acme]", peer.ip());
+        return Ok(text(StatusCode::OK, &answer));
+    }
+
     /* one atomic load, then this request works off a config that cannot change
        underneath it even if a reload lands mid-flight */
     let cfg = edge.snap.current();

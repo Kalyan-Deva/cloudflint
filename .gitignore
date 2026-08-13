@@ -6,6 +6,12 @@
 cloudflint.local.yaml
 *.pem
 *.key
+# certificates and acme account keys live here and none of it belongs in a repo
+certs/
+# local acme experiments
+acme-*.yaml
+acme-run.*
+pebble/
 
 node_modules/
 .next/

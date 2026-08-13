@@ -96,7 +96,10 @@ export default function Certificates() {
             aside={
               <div className="flex items-center gap-2">
                 {z.self_signed && <Tag>self-signed</Tag>}
-                <Tag>{z.mode === "manual" ? "manual certificate" : "no tls"}</Tag>
+                <Tag>
+                  {{ acme: "acme", manual: "manual certificate", off: "no tls" }[z.mode] ??
+                    z.mode}
+                </Tag>
               </div>
             }
           >
