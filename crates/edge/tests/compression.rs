@@ -11,8 +11,8 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use cloudveil_edge::snapshot::Snapshot;
-use cloudveil_edge::{admin, config, serve, Edge};
+use cloudflint_edge::snapshot::Snapshot;
+use cloudflint_edge::{admin, config, serve, Edge};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
@@ -23,7 +23,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
 
-const TOKEN: &str = "cv_compresstoken0123456789abcdef0123456789abcdef0123456789ab";
+const TOKEN: &str = "cfl_compresstoken0123456789abcdef0123456789abcdef0123456789ab";
 
 /// The page every test asks for: big enough to be worth compressing, and repetitive
 /// enough that the saving is unmistakable.
@@ -142,7 +142,7 @@ async fn get(edge: SocketAddr, path: &str, accept: &str) -> Got {
     };
     let status = resp.status();
     let encoding = header("content-encoding");
-    let cache = header("cloudveil-cache");
+    let cache = header("cloudflint-cache");
     let origin_saw = header("x-origin-saw");
     let body = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
 
@@ -368,7 +368,7 @@ async fn compression_shows_up_in_the_scrape() {
     let body = String::from_utf8_lossy(&body);
 
     assert!(
-        body.contains(r#"cloudveil_compressed_total{zone="demo",coding="gzip"} 1"#),
+        body.contains(r#"cloudflint_compressed_total{zone="demo",coding="gzip"} 1"#),
         "no compression counter:\n{body}"
     );
 
@@ -378,7 +378,7 @@ async fn compression_shows_up_in_the_scrape() {
             .and_then(|l| l[name.len()..].trim().parse().ok())
             .unwrap_or_else(|| panic!("no {name} in\n{body}"))
     };
-    let before = value(r#"cloudveil_compressed_bytes_in_total{zone="demo"}"#);
-    let after = value(r#"cloudveil_compressed_bytes_out_total{zone="demo"}"#);
+    let before = value(r#"cloudflint_compressed_bytes_in_total{zone="demo"}"#);
+    let after = value(r#"cloudflint_compressed_bytes_out_total{zone="demo"}"#);
     assert!(after < before, "{after} should be less than {before}");
 }

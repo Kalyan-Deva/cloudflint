@@ -2,14 +2,14 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use cloudveil_api::db::Db;
-use cloudveil_api::{router, Api};
+use cloudflint_api::db::Db;
+use cloudflint_api::{router, Api};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
 /// Every guarded route needs a token now, so the fixture mints one and every call
 /// carries it. `TOKEN` is what the tests present; the db stores only its hash.
-const TOKEN: &str = "cv_testtoken0123456789abcdef0123456789abcdef0123456789abcdef01";
+const TOKEN: &str = "cfl_testtoken0123456789abcdef0123456789abcdef0123456789abcdef01";
 
 fn app(edges: Vec<String>) -> axum::Router {
     let db = Db::open(":memory:").expect("in-memory db");
@@ -400,7 +400,7 @@ async fn a_token_nobody_minted_is_refused() {
         .oneshot(
             Request::builder()
                 .uri("/v1/config")
-                .header("authorization", "Bearer cv_this_was_never_minted_anywhere")
+                .header("authorization", "Bearer cfl_this_was_never_minted_anywhere")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -527,14 +527,14 @@ async fn a_scrape_reports_the_management_path() {
     assert_eq!(status, StatusCode::OK);
 
     assert!(
-        body.contains("\ncloudveil_api_events_ingested_total 1\n"),
+        body.contains("\ncloudflint_api_events_ingested_total 1\n"),
         "the ingested event is missing:\n{body}"
     );
-    assert!(body.contains(r#"cloudveil_api_config_writes_total{kind="stored"} 1"#));
-    assert!(body.contains("\ncloudveil_api_edges_configured 1\n"));
-    assert!(body.contains("\ncloudveil_api_active_revision 1\n"));
-    assert!(body.contains("cloudveil_api_uptime_seconds "));
-    assert!(body.contains("cloudveil_api_build_info{version="));
+    assert!(body.contains(r#"cloudflint_api_config_writes_total{kind="stored"} 1"#));
+    assert!(body.contains("\ncloudflint_api_edges_configured 1\n"));
+    assert!(body.contains("\ncloudflint_api_active_revision 1\n"));
+    assert!(body.contains("cloudflint_api_uptime_seconds "));
+    assert!(body.contains("cloudflint_api_build_info{version="));
 }
 
 #[tokio::test]
@@ -551,7 +551,7 @@ async fn a_scrape_works_before_any_config_has_been_uploaded() {
 
     assert_eq!(status, StatusCode::OK, "a scrape must not depend on there being a config");
     assert!(
-        !body.contains("cloudveil_api_active_revision"),
+        !body.contains("cloudflint_api_active_revision"),
         "with no config there is no revision to report:\n{body}"
     );
 }

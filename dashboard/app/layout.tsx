@@ -3,7 +3,7 @@ import { Shell } from "@/components/shell";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Cloudveil",
+  title: "Cloudflint",
   description: "Edge proxy control",
 };
 

@@ -94,8 +94,8 @@ pub fn preflight(cfg: &Config) -> Result<()> {
 /// A verifier that accepts anything, for `verify: false`.
 ///
 /// rustls deliberately ships no such thing, which is the right default for a library. It
-/// is written out here rather than pulled from a crate so that the one place in Cloudveil
-/// that can skip a certificate check is visible in Cloudveil's own source.
+/// is written out here rather than pulled from a crate so that the one place in Cloudflint
+/// that can skip a certificate check is visible in Cloudflint's own source.
 #[derive(Debug)]
 struct TrustAnything;
 

@@ -21,10 +21,10 @@ use hyper_util::rt::TokioExecutor;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tracing::info;
 
-pub const TOKEN_VAR: &str = "CLOUDVEIL_CP_TOKEN";
-pub const CLIENT_CERT_VAR: &str = "CLOUDVEIL_CLIENT_CERT";
-pub const CLIENT_KEY_VAR: &str = "CLOUDVEIL_CLIENT_KEY";
-pub const CA_VAR: &str = "CLOUDVEIL_CP_CA";
+pub const TOKEN_VAR: &str = "CLOUDFLINT_CP_TOKEN";
+pub const CLIENT_CERT_VAR: &str = "CLOUDFLINT_CLIENT_CERT";
+pub const CLIENT_KEY_VAR: &str = "CLOUDFLINT_CLIENT_KEY";
+pub const CA_VAR: &str = "CLOUDFLINT_CP_CA";
 
 type Https = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
 

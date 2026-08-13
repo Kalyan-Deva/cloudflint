@@ -8,7 +8,7 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{bail, Context, Result};
-use cloudveil_edge::analytics::Event;
+use cloudflint_edge::analytics::Event;
 use rusqlite::{params, Connection};
 use serde::Serialize;
 
@@ -134,7 +134,7 @@ impl Db {
     pub fn put_config(&self, yaml: &str, note: &str, now: i64) -> Result<i64> {
         /* validated by the edge's own parser, so the control plane can never hand
            out a config the data plane would refuse */
-        cloudveil_edge::config::parse(yaml).context("config is not valid")?;
+        cloudflint_edge::config::parse(yaml).context("config is not valid")?;
 
         let conn = self.lock();
         conn.execute(
@@ -211,7 +211,7 @@ impl Db {
         let conn = self.lock();
         conn.execute(
             "INSERT INTO tokens (name, hash, created_at) VALUES (?1, ?2, ?3)",
-            params![name, cloudveil_edge::auth::hash(token), now],
+            params![name, cloudflint_edge::auth::hash(token), now],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -222,7 +222,7 @@ impl Db {
     /// attacker who could measure this would learn which hash they had already found.
     pub fn token_holder(&self, presented: &str, now: i64) -> Result<Option<String>> {
         let conn = self.lock();
-        let hash = cloudveil_edge::auth::hash(presented);
+        let hash = cloudflint_edge::auth::hash(presented);
 
         let found: Option<(i64, String)> = conn
             .query_row(

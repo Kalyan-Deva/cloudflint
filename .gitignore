@@ -3,7 +3,7 @@
 *.pdb
 
 # local overrides, never commit real origins or certs
-cloudveil.local.yaml
+cloudflint.local.yaml
 *.pem
 *.key
 

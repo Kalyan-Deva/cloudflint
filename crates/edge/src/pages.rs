@@ -58,7 +58,7 @@ fn page(status: StatusCode, heading: &str, message: &str) -> Response<Body> {
   <h1>{heading}</h1>
   <p>{message}</p>
   <hr>
-  <small>Served by <span class="mark">Cloudveil</span></small>
+  <small>Served by <span class="mark">Cloudflint</span></small>
 </main>
 </body>
 </html>

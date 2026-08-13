@@ -1,20 +1,20 @@
 [package]
-name = "cloudveil-edge"
+name = "cloudflint-edge"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Cloudveil data plane - reverse proxy, WAF, cache"
+description = "Cloudflint data plane - reverse proxy, WAF, cache"
 
 [[bin]]
-name = "cloudveil-cert"
+name = "cloudflint-cert"
 path = "src/bin/cert.rs"
 
 [lib]
-name = "cloudveil_edge"
+name = "cloudflint_edge"
 path = "src/lib.rs"
 
 [[bin]]
-name = "cloudveil-edge"
+name = "cloudflint-edge"
 path = "src/main.rs"
 
 [dependencies]

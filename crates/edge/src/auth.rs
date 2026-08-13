@@ -25,7 +25,7 @@ fn same(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Recognisable in a log or a config, and obviously not a password.
-const PREFIX: &str = "cv_";
+const PREFIX: &str = "cfl_";
 
 /// Mint a new token. Returned once, in the clear - store the hash, not this.
 pub fn generate() -> String {
@@ -73,10 +73,10 @@ impl Guard {
     pub fn from_env(var: &str) -> Result<Guard> {
         match std::env::var(var) {
             Ok(token) if token.len() >= 16 => Ok(Guard { hash: hash(&token) }),
-            Ok(_) => bail!("{var} is too short to be a token - mint one with `cloudveil-token`"),
+            Ok(_) => bail!("{var} is too short to be a token - mint one with `cloudflint-token`"),
             Err(_) => bail!(
                 "{var} is not set. The admin api has no other protection, so it will not \
-                 start without one - mint one with `cloudveil-token`"
+                 start without one - mint one with `cloudflint-token`"
             ),
         }
     }
@@ -119,8 +119,10 @@ mod tests {
         let b = generate();
 
         assert_ne!(a, b);
-        assert!(a.starts_with("cv_"));
-        assert_eq!(a.len(), 3 + 64, "256 bits, hex encoded");
+        assert!(a.starts_with(PREFIX));
+        /* derived from the prefix rather than a number: this test failed the day the
+           project was renamed, which is not something a token test should notice */
+        assert_eq!(a.len(), PREFIX.len() + 64, "256 bits, hex encoded");
     }
 
     #[test]
@@ -145,10 +147,10 @@ mod tests {
 
     #[test]
     fn reads_a_bearer_header_and_nothing_else() {
-        assert_eq!(bearer(&headers("Bearer cv_abc")), Some("cv_abc"));
-        assert_eq!(bearer(&headers("bearer cv_abc")), Some("cv_abc"));
-        assert_eq!(bearer(&headers("Basic cv_abc")), None);
-        assert_eq!(bearer(&headers("cv_abc")), None);
+        assert_eq!(bearer(&headers("Bearer cfl_abc")), Some("cfl_abc"));
+        assert_eq!(bearer(&headers("bearer cfl_abc")), Some("cfl_abc"));
+        assert_eq!(bearer(&headers("Basic cfl_abc")), None);
+        assert_eq!(bearer(&headers("cfl_abc")), None);
         assert_eq!(bearer(&headers("Bearer ")), None);
         assert_eq!(bearer(&HeaderMap::new()), None);
     }
@@ -165,7 +167,7 @@ mod tests {
 
     #[test]
     fn a_missing_or_silly_token_stops_the_guard_existing() {
-        let var = "CLOUDVEIL_TEST_TOKEN_THAT_IS_NOT_SET";
+        let var = "CLOUDFLINT_TEST_TOKEN_THAT_IS_NOT_SET";
         std::env::remove_var(var);
         let err = Guard::from_env(var).unwrap_err().to_string();
         assert!(err.contains("will not start"), "unhelpful error: {err}");

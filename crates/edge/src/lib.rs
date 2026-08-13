@@ -1,4 +1,4 @@
-﻿//! Cloudveil edge - the data plane. Everything in here sits in the request path,
+﻿//! Cloudflint edge - the data plane. Everything in here sits in the request path,
 //! so it stays free of database calls and blocking work.
 
 pub mod admin;

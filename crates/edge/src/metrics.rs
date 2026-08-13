@@ -1,4 +1,4 @@
-﻿//! Counters, gauges and histograms, in the format Prometheus scrapes.
+//! Counters, gauges and histograms, in the format Prometheus scrapes.
 //!
 //! Hand-rolled for the same reason the admin API is: the whole of the text exposition
 //! format that matters here is three lines of header and one line per series, and a
@@ -400,99 +400,99 @@ impl Metrics {
     pub fn new() -> Self {
         Metrics {
             requests: Counter::new(
-                "cloudveil_requests_total",
+                "cloudflint_requests_total",
                 "Requests answered, by zone, status and the stage that decided.",
                 &["zone", "status", "decided_by"],
             ),
             request_duration: Histogram::new(
-                "cloudveil_request_duration_seconds",
+                "cloudflint_request_duration_seconds",
                 "Time from accepting a request to answering it.",
                 &["zone"],
             ),
             cache_results: Counter::new(
-                "cloudveil_cache_results_total",
+                "cloudflint_cache_results_total",
                 "Cache decisions, by outcome: hit, miss, stale, stale-error or bypass.",
                 &["zone", "result"],
             ),
             waf_matches: Counter::new(
-                "cloudveil_waf_matches_total",
+                "cloudflint_waf_matches_total",
                 "WAF rule matches, by rule, severity and what the rule did.",
                 &["zone", "rule", "severity", "action"],
             ),
             ratelimit_decisions: Counter::new(
-                "cloudveil_ratelimit_decisions_total",
+                "cloudflint_ratelimit_decisions_total",
                 "Requests over a rate limit, by rule and whether it was enforced.",
                 &["zone", "rule", "action"],
             ),
             ratelimit_factor: Gauges::new(
-                "cloudveil_ratelimit_factor",
+                "cloudflint_ratelimit_factor",
                 "What rate limit allowances are currently multiplied by; below 1 means \
                  the adaptive tier has tightened this zone.",
                 &["zone"],
             ),
             origin_requests: Counter::new(
-                "cloudveil_origin_requests_total",
+                "cloudflint_origin_requests_total",
                 "Requests sent to an origin, including background revalidations.",
                 &["zone", "origin"],
             ),
             origin_errors: Counter::new(
-                "cloudveil_origin_errors_total",
+                "cloudflint_origin_errors_total",
                 "Origin requests that failed, by kind: unreachable or timeout.",
                 &["zone", "origin", "kind"],
             ),
             origin_duration: Histogram::new(
-                "cloudveil_origin_duration_seconds",
+                "cloudflint_origin_duration_seconds",
                 "Time waiting for an origin to start answering.",
                 &["zone", "origin"],
             ),
             origin_healthy: Gauges::new(
-                "cloudveil_origin_healthy",
+                "cloudflint_origin_healthy",
                 "1 while an origin is in rotation, 0 while it is taken out.",
                 &["zone", "origin"],
             ),
             origin_failovers: Counter::new(
-                "cloudveil_origin_failovers_total",
+                "cloudflint_origin_failovers_total",
                 "Requests that had to be sent to a second origin because the first \
                  could not be reached.",
                 &["zone"],
             ),
             origin_probes: Counter::new(
-                "cloudveil_origin_probes_total",
+                "cloudflint_origin_probes_total",
                 "Health probes sent, by result.",
                 &["zone", "origin", "result"],
             ),
             compressed: Counter::new(
-                "cloudveil_compressed_total",
+                "cloudflint_compressed_total",
                 "Responses compressed, by coding.",
                 &["zone", "coding"],
             ),
             compressed_bytes_in: Counter::new(
-                "cloudveil_compressed_bytes_in_total",
+                "cloudflint_compressed_bytes_in_total",
                 "Body bytes fed to the compressor.",
                 &["zone"],
             ),
             compressed_bytes_out: Counter::new(
-                "cloudveil_compressed_bytes_out_total",
+                "cloudflint_compressed_bytes_out_total",
                 "Body bytes it produced. The difference is the bandwidth saved.",
                 &["zone"],
             ),
             connections: Counter::new(
-                "cloudveil_connections_total",
+                "cloudflint_connections_total",
                 "Connections accepted.",
                 &[],
             ),
             connections_refused: Counter::new(
-                "cloudveil_connections_refused_total",
+                "cloudflint_connections_refused_total",
                 "Connections refused at accept time, by reason.",
                 &["reason"],
             ),
             connections_active: Gauges::new(
-                "cloudveil_connections_active",
+                "cloudflint_connections_active",
                 "Connections currently open.",
                 &[],
             ),
             tls_handshake_failures: Counter::new(
-                "cloudveil_tls_handshake_failures_total",
+                "cloudflint_tls_handshake_failures_total",
                 "TLS handshakes that never completed, by reason.",
                 &["reason"],
             ),
@@ -755,16 +755,16 @@ mod tests {
         let out = m.render();
 
         assert!(
-            out.contains("# HELP cloudveil_requests_total Requests answered"),
+            out.contains("# HELP cloudflint_requests_total Requests answered"),
             "no help line:\n{out}"
         );
-        assert!(out.contains("# TYPE cloudveil_requests_total counter"));
+        assert!(out.contains("# TYPE cloudflint_requests_total counter"));
         assert_eq!(
-            line(&out, r#"cloudveil_requests_total{zone="demo",status="200",decided_by="origin"}"#),
+            line(&out, r#"cloudflint_requests_total{zone="demo",status="200",decided_by="origin"}"#),
             Some("1".into())
         );
         assert_eq!(
-            line(&out, r#"cloudveil_cache_results_total{zone="demo",result="miss"}"#),
+            line(&out, r#"cloudflint_cache_results_total{zone="demo",result="miss"}"#),
             Some("1".into())
         );
     }
@@ -780,7 +780,7 @@ mod tests {
         let at = |le: &str| {
             line(
                 &out,
-                &format!(r#"cloudveil_request_duration_seconds_bucket{{zone="demo",le="{le}"}}"#),
+                &format!(r#"cloudflint_request_duration_seconds_bucket{{zone="demo",le="{le}"}}"#),
             )
         };
         assert_eq!(at("0.001"), Some("1".into()), "1ms falls in the 1ms bucket");
@@ -789,11 +789,11 @@ mod tests {
         assert_eq!(at("10"), Some("4".into()), "4s is under the last edge");
         assert_eq!(at("+Inf"), Some("4".into()));
         assert_eq!(
-            line(&out, r#"cloudveil_request_duration_seconds_count{zone="demo"}"#),
+            line(&out, r#"cloudflint_request_duration_seconds_count{zone="demo"}"#),
             Some("4".into())
         );
         assert_eq!(
-            line(&out, r#"cloudveil_request_duration_seconds_sum{zone="demo"}"#),
+            line(&out, r#"cloudflint_request_duration_seconds_sum{zone="demo"}"#),
             Some("4.061".into())
         );
     }
@@ -829,11 +829,11 @@ mod tests {
         let out = m.render();
 
         assert_eq!(
-            line(&out, r#"cloudveil_request_duration_seconds_bucket{zone="slow",le="10"}"#),
+            line(&out, r#"cloudflint_request_duration_seconds_bucket{zone="slow",le="10"}"#),
             Some("0".into())
         );
         assert_eq!(
-            line(&out, r#"cloudveil_request_duration_seconds_bucket{zone="slow",le="+Inf"}"#),
+            line(&out, r#"cloudflint_request_duration_seconds_bucket{zone="slow",le="+Inf"}"#),
             Some("1".into())
         );
     }
@@ -848,7 +848,7 @@ mod tests {
         assert_eq!(m.connections.get(&[]), 2);
         assert_eq!(m.connections_active.get(&[]), 1.0);
         /* an unlabelled family renders with no braces at all */
-        assert!(m.render().contains("\ncloudveil_connections_active 1\n"));
+        assert!(m.render().contains("\ncloudflint_connections_active 1\n"));
     }
 
     #[test]
@@ -857,7 +857,7 @@ mod tests {
         m.ratelimit_factor.set(&["demo"], 0.5);
         m.ratelimit_factor.set(&["demo"], 1.0);
         assert_eq!(m.ratelimit_factor.get(&["demo"]), 1.0);
-        assert!(m.render().contains(r#"cloudveil_ratelimit_factor{zone="demo"} 1"#));
+        assert!(m.render().contains(r#"cloudflint_ratelimit_factor{zone="demo"} 1"#));
     }
 
     #[test]
@@ -873,7 +873,7 @@ mod tests {
         /* every line is either a comment or a sample - nothing broke out */
         for l in out.lines() {
             assert!(
-                l.starts_with('#') || l.starts_with("cloudveil_"),
+                l.starts_with('#') || l.starts_with("cloudflint_"),
                 "stray line: {l}"
             );
         }
@@ -881,7 +881,7 @@ mod tests {
 
     #[test]
     fn series_are_capped_and_the_loss_is_counted() {
-        let family = Counter::new("cloudveil_test_total", "A test.", &["n"]);
+        let family = Counter::new("cloudflint_test_total", "A test.", &["n"]);
         for n in 0..(MAX_SERIES + 50) {
             family.inc(&[&n.to_string()]);
         }
@@ -904,20 +904,20 @@ mod tests {
     #[test]
     fn pulled_samples_carry_their_own_headers() {
         let mut out = String::new();
-        gauge(&mut out, "cloudveil_cache_bytes", "Bytes held.", 4096.0);
-        counter(&mut out, "cloudveil_events_dropped_total", "Events shed.", 3.0);
+        gauge(&mut out, "cloudflint_cache_bytes", "Bytes held.", 4096.0);
+        counter(&mut out, "cloudflint_events_dropped_total", "Events shed.", 3.0);
         labelled_gauge(
             &mut out,
-            "cloudveil_build_info",
+            "cloudflint_build_info",
             "Version.",
             &[("version", "0.1.0")],
             1.0,
         );
 
-        assert!(out.contains("# TYPE cloudveil_cache_bytes gauge"));
-        assert!(out.contains("\ncloudveil_cache_bytes 4096\n"));
-        assert!(out.contains("# TYPE cloudveil_events_dropped_total counter"));
-        assert!(out.contains(r#"cloudveil_build_info{version="0.1.0"} 1"#));
+        assert!(out.contains("# TYPE cloudflint_cache_bytes gauge"));
+        assert!(out.contains("\ncloudflint_cache_bytes 4096\n"));
+        assert!(out.contains("# TYPE cloudflint_events_dropped_total counter"));
+        assert!(out.contains(r#"cloudflint_build_info{version="0.1.0"} 1"#));
     }
 
     #[test]

@@ -3,8 +3,8 @@
 # cargo invocation and one layer of dependencies instead of two.
 #
 # Which one runs is the command:
-#   docker run cloudveil cloudveil-edge /etc/cloudveil/cloudveil.yaml
-#   docker run cloudveil cloudveil-api 0.0.0.0:9000 /var/lib/cloudveil/cloudveil.db
+#   docker run cloudflint cloudflint-edge /etc/cloudflint/cloudflint.yaml
+#   docker run cloudflint cloudflint-api 0.0.0.0:9000 /var/lib/cloudflint/cloudflint.db
 
 FROM rust:1-slim-bookworm AS build
 
@@ -27,8 +27,8 @@ COPY crates crates
 COPY rulesets rulesets
 # cargo will not rebuild a source whose mtime looks older than the artefact
 RUN touch crates/edge/src/lib.rs crates/api/src/lib.rs \
-    && cargo build --release -p cloudveil-edge -p cloudveil-api \
-    && strip target/release/cloudveil-edge target/release/cloudveil-api target/release/cloudveil-cert
+    && cargo build --release -p cloudflint-edge -p cloudflint-api \
+    && strip target/release/cloudflint-edge target/release/cloudflint-api target/release/cloudflint-cert
 
 # debian-slim rather than distroless or scratch: the binaries are dynamically linked
 # against glibc, and TLS to an origin over https needs the system root certificates.
@@ -37,17 +37,17 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --create-home --shell /usr/sbin/nologin cloudveil \
-    && mkdir -p /etc/cloudveil /var/lib/cloudveil \
-    && chown cloudveil:cloudveil /var/lib/cloudveil
+    && useradd --system --create-home --shell /usr/sbin/nologin cloudflint \
+    && mkdir -p /etc/cloudflint /var/lib/cloudflint \
+    && chown cloudflint:cloudflint /var/lib/cloudflint
 
-COPY --from=build /src/target/release/cloudveil-edge /usr/local/bin/
-COPY --from=build /src/target/release/cloudveil-api /usr/local/bin/
-COPY --from=build /src/target/release/cloudveil-cert /usr/local/bin/
+COPY --from=build /src/target/release/cloudflint-edge /usr/local/bin/
+COPY --from=build /src/target/release/cloudflint-api /usr/local/bin/
+COPY --from=build /src/target/release/cloudflint-cert /usr/local/bin/
 
 # Nothing here needs root. Ports below 1024 are the load balancer's problem, not ours.
-USER cloudveil
-WORKDIR /var/lib/cloudveil
+USER cloudflint
+WORKDIR /var/lib/cloudflint
 
 # edge traffic, edge https, edge admin (health, metrics, purge), control plane
 EXPOSE 8080 8443 9001 9000
@@ -57,4 +57,4 @@ EXPOSE 8080 8443 9001 9000
 STOPSIGNAL SIGTERM
 
 ENTRYPOINT []
-CMD ["cloudveil-edge", "/etc/cloudveil/cloudveil.yaml"]
+CMD ["cloudflint-edge", "/etc/cloudflint/cloudflint.yaml"]

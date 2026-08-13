@@ -10,8 +10,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cloudveil_edge::snapshot::Snapshot;
-use cloudveil_edge::{admin, config, serve, Edge};
+use cloudflint_edge::snapshot::Snapshot;
+use cloudflint_edge::{admin, config, serve, Edge};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
@@ -22,7 +22,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
 
-const TOKEN: &str = "cv_shutdowntoken0123456789abcdef0123456789abcdef0123456789ab";
+const TOKEN: &str = "cfl_shutdowntoken0123456789abcdef0123456789abcdef0123456789ab";
 
 /// An origin that takes its time, so a request can still be in flight when the signal
 /// arrives.
@@ -190,7 +190,7 @@ async fn health_says_draining_before_anything_is_torn_down() {
     let resp = client().request(scrape).await.expect("metrics should answer");
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert!(
-        String::from_utf8_lossy(&body).contains("\ncloudveil_draining 1\n"),
+        String::from_utf8_lossy(&body).contains("\ncloudflint_draining 1\n"),
         "a scrape should show the node draining too"
     );
 }

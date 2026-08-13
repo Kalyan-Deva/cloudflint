@@ -19,7 +19,7 @@ use crate::stages::origin::strip_hop_by_hop;
 use crate::Edge;
 
 /// Header the cache stage labels its decision with.
-const CACHE_HEADER: &str = "cloudveil-cache";
+const CACHE_HEADER: &str = "cloudflint-cache";
 
 struct Outcome {
     resp: Response<Body>,
@@ -169,5 +169,5 @@ fn finalize(resp: &mut Response<Body>) {
         strip_hop_by_hop(resp.headers_mut());
     }
     resp.headers_mut()
-        .insert(header::SERVER, HeaderValue::from_static("cloudveil"));
+        .insert(header::SERVER, HeaderValue::from_static("cloudflint"));
 }

@@ -1,4 +1,4 @@
-//! Cloudveil control plane.
+//! Cloudflint control plane.
 //!
 //! Owns the config and the analytics. Never sits in anyone's request path: the edge
 //! pulls a snapshot from here and then serves traffic entirely from memory, so this
@@ -16,7 +16,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use cloudveil_edge::analytics::Event;
+use cloudflint_edge::analytics::Event;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, warn};
@@ -69,7 +69,7 @@ pub fn router(api: Api) -> Router {
         .route_layer(axum::middleware::from_fn_with_state(api.clone(), require_token));
 
     /* the same call as the edge makes about its own /metrics, and for the same
-       reasons - see cloudveil_edge::admin */
+       reasons - see cloudflint_edge::admin */
     let scrape = Router::new().route("/metrics", get(metrics));
     let scrape = match metrics_are_open() {
         true => scrape,
@@ -88,7 +88,7 @@ pub fn router(api: Api) -> Router {
 
 fn metrics_are_open() -> bool {
     matches!(
-        std::env::var(cloudveil_edge::admin::METRICS_OPEN_VAR).as_deref(),
+        std::env::var(cloudflint_edge::admin::METRICS_OPEN_VAR).as_deref(),
         Ok("1") | Ok("true")
     )
 }
@@ -102,7 +102,7 @@ async fn metrics(State(api): State<Api>) -> impl IntoResponse {
     let body = api.metrics.render(revision, api.edges.len());
 
     (
-        [(axum::http::header::CONTENT_TYPE, cloudveil_edge::metrics::CONTENT_TYPE)],
+        [(axum::http::header::CONTENT_TYPE, cloudflint_edge::metrics::CONTENT_TYPE)],
         body,
     )
 }
@@ -113,7 +113,7 @@ async fn require_token(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, Problem> {
-    let Some(token) = cloudveil_edge::auth::bearer(req.headers()) else {
+    let Some(token) = cloudflint_edge::auth::bearer(req.headers()) else {
         return Err(Problem(
             StatusCode::UNAUTHORIZED,
             "a bearer token is required".into(),
@@ -144,7 +144,7 @@ async fn mint_token(State(api): State<Api>, Json(body): Json<MintToken>) -> ApiR
     if body.name.trim().is_empty() {
         return Err(bad_request("a token needs a name, so it can be recognised later"));
     }
-    let token = cloudveil_edge::auth::generate();
+    let token = cloudflint_edge::auth::generate();
     let id = api
         .db
         .add_token(body.name.trim(), &token, now_ms())
@@ -337,7 +337,7 @@ async fn zones(State(api): State<Api>) -> ApiResult {
             "no config has been uploaded yet".into(),
         ));
     };
-    let cfg = cloudveil_edge::config::parse(&active.yaml).map_err(internal)?;
+    let cfg = cloudflint_edge::config::parse(&active.yaml).map_err(internal)?;
 
     let views: Vec<ZoneView> = cfg
         .zones
@@ -412,7 +412,7 @@ fn example_ip() -> String {
 /// This is the whole reason the control plane links the edge crate: the answer here
 /// has to be the answer the edge would give, not a second implementation that drifts.
 async fn waf_test(State(api): State<Api>, Json(t): Json<WafTest>) -> ApiResult {
-    use cloudveil_edge::waf::{decode, Input};
+    use cloudflint_edge::waf::{decode, Input};
 
     let yaml = match t.yaml {
         Some(yaml) => yaml,
@@ -424,7 +424,7 @@ async fn waf_test(State(api): State<Api>, Json(t): Json<WafTest>) -> ApiResult {
                 .yaml
         }
     };
-    let cfg = cloudveil_edge::config::parse(&yaml).map_err(bad_request)?;
+    let cfg = cloudflint_edge::config::parse(&yaml).map_err(bad_request)?;
     let zone = cfg
         .zones
         .iter()

@@ -11,10 +11,10 @@ use std::time::Duration;
 
 use axum::body::Body as AxumBody;
 use axum::http::Request as AxumRequest;
-use cloudveil_api::db::Db;
-use cloudveil_api::{router, Api};
-use cloudveil_edge::snapshot::{self, Snapshot};
-use cloudveil_edge::{admin, config, serve, Edge};
+use cloudflint_api::db::Db;
+use cloudflint_api::{router, Api};
+use cloudflint_edge::snapshot::{self, Snapshot};
+use cloudflint_edge::{admin, config, serve, Edge};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
@@ -54,12 +54,12 @@ async fn spawn_origin(hits: Arc<AtomicUsize>) -> SocketAddr {
 }
 
 /// The whole loop is authenticated now, so the fixture sets both tokens up front.
-const CP_TOKEN: &str = "cv_looptoken0123456789abcdef0123456789abcdef0123456789abcdef01";
-const ADMIN_TOKEN: &str = "cv_admintoken789abcdef0123456789abcdef0123456789abcdef012345";
+const CP_TOKEN: &str = "cfl_looptoken0123456789abcdef0123456789abcdef0123456789abcdef01";
+const ADMIN_TOKEN: &str = "cfl_admintoken789abcdef0123456789abcdef0123456789abcdef012345";
 
 fn set_tokens() {
-    std::env::set_var(cloudveil_edge::cp::TOKEN_VAR, CP_TOKEN);
-    std::env::set_var(cloudveil_edge::admin::TOKEN_VAR, ADMIN_TOKEN);
+    std::env::set_var(cloudflint_edge::cp::TOKEN_VAR, CP_TOKEN);
+    std::env::set_var(cloudflint_edge::admin::TOKEN_VAR, ADMIN_TOKEN);
 }
 
 async fn spawn_control_plane(edges: Vec<String>) -> (SocketAddr, Db) {
@@ -92,7 +92,7 @@ async fn get(addr: SocketAddr, host: &str, path: &str) -> (StatusCode, String, O
     let status = resp.status();
     let cache = resp
         .headers()
-        .get("cloudveil-cache")
+        .get("cloudflint-cache")
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
     let body = resp.into_body().collect().await.unwrap().to_bytes();

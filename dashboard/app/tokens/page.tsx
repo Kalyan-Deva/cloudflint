@@ -77,8 +77,8 @@ export default function Tokens() {
               <Button onClick={() => navigator.clipboard?.writeText(minted.token)}>copy</Button>
             </div>
             <p className="text-[11px] text-dim">
-              For an edge: <code>CLOUDVEIL_CP_TOKEN</code>. For the dashboard:{" "}
-              <code>CLOUDVEIL_API_TOKEN</code>.
+              For an edge: <code>CLOUDFLINT_CP_TOKEN</code>. For the dashboard:{" "}
+              <code>CLOUDFLINT_API_TOKEN</code>.
             </p>
             <Button size="sm" onClick={() => setMinted(null)}>
               done
@@ -139,7 +139,7 @@ export default function Tokens() {
 
       <p className="text-[11.5px] text-dim">
         Revoking takes effect on the next request. The edge admin API has its own token, set as{" "}
-        <code>CLOUDVEIL_ADMIN_TOKEN</code> on the edge itself — secrets never travel in config,
+        <code>CLOUDFLINT_ADMIN_TOKEN</code> on the edge itself — secrets never travel in config,
         because config travels between nodes and is editable right here.
       </p>
     </div>

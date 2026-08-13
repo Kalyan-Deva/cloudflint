@@ -91,8 +91,8 @@ export function Shell({ children }: { children: React.ReactNode }) {
     <div className="min-h-screen flex">
       <aside className="w-[230px] shrink-0 border-r hair bg-base fixed inset-y-0 left-0 flex flex-col">
         <div className="h-[62px] flex items-center gap-2.5 px-5 border-b hair">
-          <Veil />
-          <span className="text-[15px] tracking-[0.14em] font-semibold">CLOUDVEIL</span>
+          <Flint />
+          <span className="text-[15px] tracking-[0.14em] font-semibold">CLOUDFLINT</span>
         </div>
 
         <nav className="flex-1 overflow-y-auto py-4">
@@ -205,13 +205,22 @@ function uptime(seconds: number) {
   return `${Math.floor(seconds / 86400)}d`;
 }
 
-/* A veil: something drawn across, with what is behind it just visible. */
-function Veil() {
+/* A struck flint: the stone, and the sparks coming off it. The old mark was three
+   drawn-across curves for a veil, which stopped meaning anything when the name changed. */
+function Flint() {
   return (
     <svg width="18" height="18" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <path d="M2 5.2c1.6-1.4 3.3-2.1 5-2.1s3.4.7 5 2.1" stroke="var(--color-accent)" strokeWidth="1.7" strokeLinecap="round" />
-      <path d="M2.6 8.4c1.5-1.2 3-1.8 4.4-1.8s2.9.6 4.4 1.8" stroke="var(--color-accent)" strokeWidth="1.5" strokeLinecap="round" opacity="0.6" />
-      <path d="M3.4 11.4c1.3-1 2.5-1.5 3.6-1.5s2.3.5 3.6 1.5" stroke="var(--color-accent)" strokeWidth="1.3" strokeLinecap="round" opacity="0.32" />
+      {/* the stone: angular, struck, not a tidy shape */}
+      <path
+        d="M3.1 9.6L5.4 4.3l4.3-1.1 1.5 3.4-2.2 5.1-4.6 0.6z"
+        stroke="var(--color-accent)"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+      {/* sparks, thrown off the struck edge and fading as they go */}
+      <path d="M12.1 3.4l1.9-1.6" stroke="var(--color-accent)" strokeWidth="1.5" strokeLinecap="round" />
+      <path d="M13 6.2l1.9-0.5" stroke="var(--color-accent)" strokeWidth="1.3" strokeLinecap="round" opacity="0.62" />
+      <path d="M11.9 1.2l0.4 1.5" stroke="var(--color-accent)" strokeWidth="1.2" strokeLinecap="round" opacity="0.38" />
     </svg>
   );
 }

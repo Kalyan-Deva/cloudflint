@@ -1,25 +1,25 @@
-﻿# The whole thing running: control plane, edge, and an origin to put behind it.
+# The whole thing running: control plane, edge, and an origin to put behind it.
 #
-#   CLOUDVEIL_API_TOKEN=cv_... CLOUDVEIL_ADMIN_TOKEN=cv_... docker compose up
+#   CLOUDFLINT_API_TOKEN=cfl_... CLOUDFLINT_ADMIN_TOKEN=cfl_... docker compose up
 #
-# Mint tokens with `openssl rand -hex 32` and prefix them `cv_`. Nothing here has a
+# Mint tokens with `openssl rand -hex 32` and prefix them `cfl_`. Nothing here has a
 # default: a compose file with a token in it is a token in your shell history.
 
 services:
   api:
-    # one image, named the same by both services, so `docker build -t cloudveil .`
+    # one image, named the same by both services, so `docker build -t cloudflint .`
     # followed by `up --no-build` works and the image is only built once
-    image: cloudveil:latest
+    image: cloudflint:latest
     build: .
-    command: ["cloudveil-api", "0.0.0.0:9000", "/var/lib/cloudveil/cloudveil.db", "http://edge:9001"]
+    command: ["cloudflint-api", "0.0.0.0:9000", "/var/lib/cloudflint/cloudflint.db", "http://edge:9001"]
     environment:
       # the bootstrap token, stored hashed on first start
-      CLOUDVEIL_API_TOKEN: "${CLOUDVEIL_API_TOKEN:?mint one - openssl rand -hex 32}"
+      CLOUDFLINT_API_TOKEN: "${CLOUDFLINT_API_TOKEN:?mint one - openssl rand -hex 32}"
       # what this process presents to the edge's admin api when fanning out a purge
-      CLOUDVEIL_EDGE_TOKEN: "${CLOUDVEIL_ADMIN_TOKEN:?mint one - openssl rand -hex 32}"
-      CLOUDVEIL_LOG_FORMAT: json
+      CLOUDFLINT_EDGE_TOKEN: "${CLOUDFLINT_ADMIN_TOKEN:?mint one - openssl rand -hex 32}"
+      CLOUDFLINT_LOG_FORMAT: json
     volumes:
-      - api-data:/var/lib/cloudveil
+      - api-data:/var/lib/cloudflint
     ports:
       - "127.0.0.1:9000:9000"
     healthcheck:
@@ -33,16 +33,16 @@ services:
       start_period: 5s
 
   edge:
-    image: cloudveil:latest
+    image: cloudflint:latest
     build: .
-    command: ["cloudveil-edge", "/etc/cloudveil/cloudveil.yaml"]
+    command: ["cloudflint-edge", "/etc/cloudflint/cloudflint.yaml"]
     environment:
-      CLOUDVEIL_ADMIN_TOKEN: "${CLOUDVEIL_ADMIN_TOKEN:?mint one - openssl rand -hex 32}"
+      CLOUDFLINT_ADMIN_TOKEN: "${CLOUDFLINT_ADMIN_TOKEN:?mint one - openssl rand -hex 32}"
       # the edge pulls config from the control plane and ships analytics back
-      CLOUDVEIL_CP_TOKEN: "${CLOUDVEIL_API_TOKEN:?mint one - openssl rand -hex 32}"
-      CLOUDVEIL_LOG_FORMAT: json
+      CLOUDFLINT_CP_TOKEN: "${CLOUDFLINT_API_TOKEN:?mint one - openssl rand -hex 32}"
+      CLOUDFLINT_LOG_FORMAT: json
     volumes:
-      - ./deploy/edge.yaml:/etc/cloudveil/cloudveil.yaml:ro
+      - ./deploy/edge.yaml:/etc/cloudflint/cloudflint.yaml:ro
     ports:
       - "8080:8080"
       # admin stays on loopback: it is purge, stats and a scrape of your traffic shape

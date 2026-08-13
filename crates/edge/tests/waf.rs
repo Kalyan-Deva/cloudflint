@@ -6,8 +6,8 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use cloudveil_edge::snapshot::Snapshot;
-use cloudveil_edge::{config, serve, Edge};
+use cloudflint_edge::snapshot::Snapshot;
+use cloudflint_edge::{config, serve, Edge};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
@@ -106,7 +106,7 @@ async fn the_waf_is_on_by_default() {
     let (status, body) = get(proxy, "/search?id=1%20union%20select%20password").await;
 
     assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(body.contains("Cloudveil"), "expected the block page, got {body}");
+    assert!(body.contains("Cloudflint"), "expected the block page, got {body}");
     assert_eq!(hits.load(Ordering::SeqCst), 0, "the origin should never have been touched");
 }
 

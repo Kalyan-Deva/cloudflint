@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cloudveil_edge::snapshot::Snapshot;
-use cloudveil_edge::{config, serve, Edge};
+use cloudflint_edge::snapshot::Snapshot;
+use cloudflint_edge::{config, serve, Edge};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
@@ -153,7 +153,7 @@ async fn request(proxy: SocketAddr, method: &str, path: &str) -> Reply {
     let status = resp.status();
     let cache = resp
         .headers()
-        .get("cloudveil-cache")
+        .get("cloudflint-cache")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("-")
         .to_string();
@@ -439,7 +439,7 @@ async fn hits_report_their_age() {
         .unwrap();
     let resp = client().request(req).await.unwrap();
 
-    assert_eq!(resp.headers().get("cloudveil-cache").unwrap(), "HIT");
+    assert_eq!(resp.headers().get("cloudflint-cache").unwrap(), "HIT");
     let age: u64 = resp
         .headers()
         .get("age")

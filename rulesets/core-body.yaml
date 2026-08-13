@@ -1,4 +1,4 @@
-# Cloudveil body ruleset - opt in with `rulesets: [core, core-body]`.
+# Cloudflint body ruleset - opt in with `rulesets: [core, core-body]`.
 #
 # These look at the request body, which means the edge buffers up to
 # `max_body_bytes` on every request to the zone. That's the cost; the benefit is

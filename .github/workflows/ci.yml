@@ -73,12 +73,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - run: docker build -t cloudveil .
+      - run: docker build -t cloudflint .
 
       - name: Bring the stack up
         env:
-          CLOUDVEIL_API_TOKEN: cv_ci0000000000000000000000000000000000000000000000000000000000
-          CLOUDVEIL_ADMIN_TOKEN: cv_ci1111111111111111111111111111111111111111111111111111111111
+          CLOUDFLINT_API_TOKEN: cfl_ci0000000000000000000000000000000000000000000000000000000000
+          CLOUDFLINT_ADMIN_TOKEN: cfl_ci1111111111111111111111111111111111111111111111111111111111
         run: docker compose up -d --no-build
 
       - name: Wait for the edge to report healthy

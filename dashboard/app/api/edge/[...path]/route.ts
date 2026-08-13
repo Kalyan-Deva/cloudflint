@@ -2,9 +2,9 @@
  * Thin proxy to an edge's admin API. Streams `/admin/stream` through untouched so
  * the live log stays live rather than arriving in one lump at the end.
  */
-const EDGE = process.env.CLOUDVEIL_EDGE ?? "http://127.0.0.1:9001";
+const EDGE = process.env.CLOUDFLINT_EDGE ?? "http://127.0.0.1:9001";
 /* attached here, on the server, so the token never reaches the browser */
-const TOKEN = process.env.CLOUDVEIL_ADMIN_TOKEN ?? "";
+const TOKEN = process.env.CLOUDFLINT_ADMIN_TOKEN ?? "";
 
 async function forward(req: Request, path: string[]) {
   const url = new URL(req.url);

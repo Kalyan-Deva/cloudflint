@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use cloudveil_edge::snapshot::Snapshot;
-use cloudveil_edge::{admin, config, serve, Edge};
+use cloudflint_edge::snapshot::Snapshot;
+use cloudflint_edge::{admin, config, serve, Edge};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
@@ -23,7 +23,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
 
-const TOKEN: &str = "cv_failovertoken0123456789abcdef0123456789abcdef0123456789ab";
+const TOKEN: &str = "cfl_failovertoken0123456789abcdef0123456789abcdef0123456789ab";
 
 /// An origin that says which one it is, counts what it received, and can be told to
 /// start failing without closing its listener.
@@ -238,15 +238,15 @@ async fn a_dead_origin_stops_being_asked() {
     assert!(edge_state.origins.is_healthy("demo", &pool.origins[1]));
 
     let body = scrape(admin).await;
-    let dead_series = format!(r#"cloudveil_origin_healthy{{zone="demo",origin="{dead}"}} 0"#);
+    let dead_series = format!(r#"cloudflint_origin_healthy{{zone="demo",origin="{dead}"}} 0"#);
     assert!(body.contains(&dead_series), "no unhealthy gauge:\n{body}");
     assert!(
-        body.contains(r#"cloudveil_origin_failovers_total{zone="demo"}"#),
+        body.contains(r#"cloudflint_origin_failovers_total{zone="demo"}"#),
         "failovers should be counted:\n{body}"
     );
     assert!(
         body.contains(&format!(
-            r#"cloudveil_origin_errors_total{{zone="demo",origin="{dead}",kind="unreachable"}}"#
+            r#"cloudflint_origin_errors_total{{zone="demo",origin="{dead}",kind="unreachable"}}"#
         )),
         "errors should name the origin that failed:\n{body}"
     );
@@ -409,13 +409,13 @@ async fn a_probe_finds_a_dead_origin_before_anybody_asks() {
     let body = scrape(admin).await;
     assert!(
         body.contains(&format!(
-            r#"cloudveil_origin_probes_total{{zone="demo",origin="{dead}",result="failed"}}"#
+            r#"cloudflint_origin_probes_total{{zone="demo",origin="{dead}",result="failed"}}"#
         )),
         "probe failures should be counted:\n{body}"
     );
     assert!(
         body.contains(&format!(
-            r#"cloudveil_origin_probes_total{{zone="demo",origin="{}",result="ok"}}"#,
+            r#"cloudflint_origin_probes_total{{zone="demo",origin="{}",result="ok"}}"#,
             backup.addr
         )),
         "and probe successes too:\n{body}"

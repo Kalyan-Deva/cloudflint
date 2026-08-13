@@ -13,9 +13,9 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 2 {
         eprintln!("usage:");
-        eprintln!("  cloudveil-cert <out-dir> <hostname> [hostname...]");
+        eprintln!("  cloudflint-cert <out-dir> <hostname> [hostname...]");
         eprintln!("      a self-signed certificate for the edge's https listener");
-        eprintln!("  cloudveil-cert --mtls <out-dir> <control-plane-hostname>");
+        eprintln!("  cloudflint-cert --mtls <out-dir> <control-plane-hostname>");
         eprintln!("      a private CA, a server certificate for the control plane, and a");
         eprintln!("      client certificate for the edges");
         bail!("not enough arguments");
@@ -73,7 +73,7 @@ fn mtls(dir: PathBuf, host: Option<String>) -> Result<()> {
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     ca_params
         .distinguished_name
-        .push(DnType::CommonName, "Cloudveil internal CA");
+        .push(DnType::CommonName, "Cloudflint internal CA");
     ca_params.key_usages = vec![
         KeyUsagePurpose::KeyCertSign,
         KeyUsagePurpose::CrlSign,
@@ -93,10 +93,10 @@ fn mtls(dir: PathBuf, host: Option<String>) -> Result<()> {
     let server_key = KeyPair::generate()?;
     let server_cert = server.signed_by(&server_key, &issuer)?;
 
-    let mut client = CertificateParams::new(vec!["cloudveil-edge".to_string()])?;
+    let mut client = CertificateParams::new(vec!["cloudflint-edge".to_string()])?;
     client
         .distinguished_name
-        .push(DnType::CommonName, "cloudveil-edge");
+        .push(DnType::CommonName, "cloudflint-edge");
     client.use_authority_key_identifier_extension = true;
     client.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
     let client_key = KeyPair::generate()?;
@@ -121,14 +121,14 @@ fn mtls(dir: PathBuf, host: Option<String>) -> Result<()> {
     println!("  the CA key signs certificates - keep it off the edges entirely");
     println!();
     println!("control plane:");
-    println!("  CLOUDVEIL_API_TLS_CERT={}", p(&server_crt));
-    println!("  CLOUDVEIL_API_TLS_KEY={}", p(&server_k));
-    println!("  CLOUDVEIL_API_CLIENT_CA={}", p(&ca_path));
+    println!("  CLOUDFLINT_API_TLS_CERT={}", p(&server_crt));
+    println!("  CLOUDFLINT_API_TLS_KEY={}", p(&server_k));
+    println!("  CLOUDFLINT_API_CLIENT_CA={}", p(&ca_path));
     println!();
     println!("each edge:");
-    println!("  CLOUDVEIL_CLIENT_CERT={}", p(&client_crt));
-    println!("  CLOUDVEIL_CLIENT_KEY={}", p(&client_k));
-    println!("  CLOUDVEIL_CP_CA={}", p(&ca_path));
+    println!("  CLOUDFLINT_CLIENT_CERT={}", p(&client_crt));
+    println!("  CLOUDFLINT_CLIENT_KEY={}", p(&client_k));
+    println!("  CLOUDFLINT_CP_CA={}", p(&ca_path));
     println!("  (and control_plane: \"https://{host}:9000\" in its config)");
 
     Ok(())

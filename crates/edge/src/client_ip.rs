@@ -1,7 +1,7 @@
 //! Who the client actually is.
 //!
 //! Everything the edge decides per client is keyed on one address: rate limit buckets,
-//! `ip.src` rules, the live log. When Cloudveil is the first thing traffic touches, that
+//! `ip.src` rules, the live log. When Cloudflint is the first thing traffic touches, that
 //! address is the peer on the socket and there is nothing to work out.
 //!
 //! Put it behind anything - a cloud load balancer, another CDN, an ingress controller -

@@ -1,14 +1,18 @@
-# Cloudveil
+# Cloudflint
 
-[![ci](https://github.com/Kalyan-Deva/cloudveil/actions/workflows/ci.yml/badge.svg)](https://github.com/Kalyan-Deva/cloudveil/actions/workflows/ci.yml)
+[![ci](https://github.com/Kalyan-Deva/cloudflint/actions/workflows/ci.yml/badge.svg)](https://github.com/Kalyan-Deva/cloudflint/actions/workflows/ci.yml)
 
 An edge reverse proxy with a WAF, a cache and rate limiting, written from scratch in
 Rust. Nothing here wraps nginx or Envoy.
 
+Flint is the thing you strike to get a spark — the edge is where a request first meets
+something hard, and where the interesting reactions happen.
+[cloudflint.org](https://cloudflint.org)
+
 Two processes and a dashboard:
 
-- `cloudveil-edge` — data plane. tokio + hyper + rustls, sits in front of origins.
-- `cloudveil-api` — control plane. axum + SQLite. Owns config and analytics.
+- `cloudflint-edge` — data plane. tokio + hyper + rustls, sits in front of origins.
+- `cloudflint-api` — control plane. axum + SQLite. Owns config and analytics.
 - `dashboard/` — Next.js UI on port 3020. Overview, zones, **origins** (health, latency,
   error rate, traffic share, failover events), WAF rules with a rule tester, a live log,
   config with revisions and rollback, and tokens.
@@ -38,11 +42,11 @@ Two processes and a dashboard:
 ## Running it
 
 ```bash
-cargo run -p cloudveil-api -- 127.0.0.1:9000 cloudveil.db http://127.0.0.1:9001
+cargo run -p cloudflint-api -- 127.0.0.1:9000 cloudflint.db http://127.0.0.1:9001
 ```
 
 ```bash
-cargo run -p cloudveil-edge -- cloudveil.yaml
+cargo run -p cloudflint-edge -- cloudflint.yaml
 ```
 
 ```bash
@@ -57,11 +61,11 @@ dashboard — see Credentials below.
 One image holds both binaries; which one runs is the command.
 
 ```bash
-docker build -t cloudveil .
+docker build -t cloudflint .
 ```
 
 ```bash
-CLOUDVEIL_API_TOKEN=cv_$(openssl rand -hex 32) CLOUDVEIL_ADMIN_TOKEN=cv_$(openssl rand -hex 32) docker compose up
+CLOUDFLINT_API_TOKEN=cfl_$(openssl rand -hex 32) CLOUDFLINT_ADMIN_TOKEN=cfl_$(openssl rand -hex 32) docker compose up
 ```
 
 That brings up the control plane on `127.0.0.1:9000`, the edge on `:8080` with its admin
@@ -73,17 +77,17 @@ API on `127.0.0.1:9001`, and an nginx container to act as an origin. Edge config
 
 ```bash
 # self-signed cert for an edge's https listener
-cargo run -p cloudveil-edge --bin cloudveil-cert -- certs demo.local "*.demo.local" localhost
+cargo run -p cloudflint-edge --bin cloudflint-cert -- certs demo.local "*.demo.local" localhost
 ```
 
 ```bash
 # a CA plus server and client certs, for mTLS between edge and control plane
-cargo run -p cloudveil-edge --bin cloudveil-cert -- --mtls certs localhost
+cargo run -p cloudflint-edge --bin cloudflint-cert -- --mtls certs localhost
 ```
 
 ## Config
 
-`cloudveil.yaml` is the full annotated example. In brief:
+`cloudflint.yaml` is the full annotated example. In brief:
 
 ```yaml
 listen: "127.0.0.1:8080"
@@ -260,12 +264,12 @@ failure is still recorded so the *next* request goes elsewhere.
 When every origin looks unhealthy they are all tried anyway. Health is a guess from a
 handful of failures, and a guess that can take the whole site down is worse than no guess.
 
-Per-origin health shows up in `/admin/stats` and as `cloudveil_origin_healthy{zone,origin}`.
+Per-origin health shows up in `/admin/stats` and as `cloudflint_origin_healthy{zone,origin}`.
 
 ### Behind a load balancer
 
 Rate limits, `ip.src` rules and the log all key on the client's address. By default that
-is the peer on the socket, which is correct when Cloudveil is the first thing traffic
+is the peer on the socket, which is correct when Cloudflint is the first thing traffic
 touches — and wrong behind a load balancer, where every client would share one bucket.
 
 Set `client_ip.trusted_proxies` to the addresses you actually run. The chain in
@@ -298,14 +302,14 @@ Secrets come from the environment, not from config.
 
 | Variable | Where | What |
 |---|---|---|
-| `CLOUDVEIL_API_TOKEN` | control plane, dashboard | bootstrap / dashboard token |
-| `CLOUDVEIL_ADMIN_TOKEN` | edge, dashboard | edge admin token (the edge will not start without it) |
-| `CLOUDVEIL_CP_TOKEN` | edge | token the edge presents to the control plane |
-| `CLOUDVEIL_EDGE_TOKEN` | control plane | token the control plane presents to edges when purging |
-| `CLOUDVEIL_CLIENT_CERT` / `_KEY` | edge | client certificate for mTLS |
-| `CLOUDVEIL_CP_CA` | edge | CA to trust for the control plane |
-| `CLOUDVEIL_API_TLS_CERT` / `_KEY` | control plane | serve HTTPS |
-| `CLOUDVEIL_API_CLIENT_CA` | control plane | require client certificates |
+| `CLOUDFLINT_API_TOKEN` | control plane, dashboard | bootstrap / dashboard token |
+| `CLOUDFLINT_ADMIN_TOKEN` | edge, dashboard | edge admin token (the edge will not start without it) |
+| `CLOUDFLINT_CP_TOKEN` | edge | token the edge presents to the control plane |
+| `CLOUDFLINT_EDGE_TOKEN` | control plane | token the control plane presents to edges when purging |
+| `CLOUDFLINT_CLIENT_CERT` / `_KEY` | edge | client certificate for mTLS |
+| `CLOUDFLINT_CP_CA` | edge | CA to trust for the control plane |
+| `CLOUDFLINT_API_TLS_CERT` / `_KEY` | control plane | serve HTTPS |
+| `CLOUDFLINT_API_CLIENT_CA` | control plane | require client certificates |
 
 `/health` on both APIs is unauthenticated so orchestrators can probe it. Everything
 else needs a bearer token.
@@ -314,8 +318,8 @@ Two more environment variables, neither of them secret:
 
 | Variable | Where | What |
 |---|---|---|
-| `CLOUDVEIL_LOG_FORMAT` | both | `json` for one JSON object per line; anything else is the human format |
-| `CLOUDVEIL_METRICS_OPEN` | both | `1` serves `/metrics` without a token |
+| `CLOUDFLINT_LOG_FORMAT` | both | `json` for one JSON object per line; anything else is the human format |
+| `CLOUDFLINT_METRICS_OPEN` | both | `1` serves `/metrics` without a token |
 
 `RUST_LOG` sets the level and filter as usual; the default is `info`.
 
@@ -353,7 +357,7 @@ counters the request path already writes — there is no second set to disagree 
 On `SIGTERM` (or ctrl-c) the edge:
 
 1. reports `{"status":"draining"}` with a 503 on `/admin/health`, and
-   `cloudveil_draining 1` on `/metrics`;
+   `cloudflint_draining 1` on `/metrics`;
 2. closes its traffic listeners, so nothing new is accepted;
 3. lets live connections finish the response in flight — HTTP/1.1 stops keeping alive,
    HTTP/2 gets a GOAWAY;
@@ -365,48 +369,48 @@ plane drains the same way, with a fixed 10s deadline.
 ## Metrics
 
 `GET /metrics` in Prometheus text format, on the edge's admin listener (`admin_listen`)
-and on the control plane. Both need a bearer token unless `CLOUDVEIL_METRICS_OPEN=1`.
+and on the control plane. Both need a bearer token unless `CLOUDFLINT_METRICS_OPEN=1`.
 
 ```yaml
 scrape_configs:
-  - job_name: cloudveil-edge
+  - job_name: cloudflint-edge
     static_configs: [{ targets: ["127.0.0.1:9001"] }]
-    authorization: { credentials: "cv_..." } # CLOUDVEIL_ADMIN_TOKEN
+    authorization: { credentials: "cfl_..." } # CLOUDFLINT_ADMIN_TOKEN
 ```
 
 From the edge:
 
 | Series | Type | Labels |
 |---|---|---|
-| `cloudveil_requests_total` | counter | `zone`, `status`, `decided_by` |
-| `cloudveil_request_duration_seconds` | histogram | `zone` |
-| `cloudveil_cache_results_total` | counter | `zone`, `result` (`hit`/`miss`/`stale`/`stale-error`/`bypass`) |
-| `cloudveil_waf_matches_total` | counter | `zone`, `rule`, `severity`, `action` |
-| `cloudveil_ratelimit_decisions_total` | counter | `zone`, `rule`, `action` |
-| `cloudveil_ratelimit_factor` | gauge | `zone` — below 1 while the adaptive tier is tightening |
-| `cloudveil_origin_requests_total` | counter | `zone`, `origin` |
-| `cloudveil_origin_errors_total` | counter | `zone`, `origin`, `kind` (`unreachable`/`timeout`) |
-| `cloudveil_origin_duration_seconds` | histogram | `zone`, `origin` |
-| `cloudveil_origin_healthy` | gauge | `zone`, `origin` — 0 while taken out of rotation |
-| `cloudveil_origin_failovers_total` | counter | `zone` |
-| `cloudveil_origin_probes_total` | counter | `zone`, `origin`, `result` |
-| `cloudveil_compressed_total` | counter | `zone`, `coding` |
-| `cloudveil_compressed_bytes_in_total` / `_out_total` | counter | `zone` — the difference is the saving |
-| `cloudveil_connections_total` | counter | |
-| `cloudveil_connections_refused_total` | counter | `reason` (`too_many`/`too_fast`) |
-| `cloudveil_connections_active` | gauge | |
-| `cloudveil_tls_handshake_failures_total` | counter | `reason` (`failed`/`timeout`) |
-| `cloudveil_cache_entries`, `cloudveil_cache_bytes` | gauge | |
-| `cloudveil_zones`, `cloudveil_uptime_seconds` | gauge | |
-| `cloudveil_events_recorded_total`, `cloudveil_events_dropped_total` | counter | |
-| `cloudveil_metrics_series_dropped_total` | counter | above zero means a series hit its cardinality cap |
-| `cloudveil_build_info` | gauge | `version` |
+| `cloudflint_requests_total` | counter | `zone`, `status`, `decided_by` |
+| `cloudflint_request_duration_seconds` | histogram | `zone` |
+| `cloudflint_cache_results_total` | counter | `zone`, `result` (`hit`/`miss`/`stale`/`stale-error`/`bypass`) |
+| `cloudflint_waf_matches_total` | counter | `zone`, `rule`, `severity`, `action` |
+| `cloudflint_ratelimit_decisions_total` | counter | `zone`, `rule`, `action` |
+| `cloudflint_ratelimit_factor` | gauge | `zone` — below 1 while the adaptive tier is tightening |
+| `cloudflint_origin_requests_total` | counter | `zone`, `origin` |
+| `cloudflint_origin_errors_total` | counter | `zone`, `origin`, `kind` (`unreachable`/`timeout`) |
+| `cloudflint_origin_duration_seconds` | histogram | `zone`, `origin` |
+| `cloudflint_origin_healthy` | gauge | `zone`, `origin` — 0 while taken out of rotation |
+| `cloudflint_origin_failovers_total` | counter | `zone` |
+| `cloudflint_origin_probes_total` | counter | `zone`, `origin`, `result` |
+| `cloudflint_compressed_total` | counter | `zone`, `coding` |
+| `cloudflint_compressed_bytes_in_total` / `_out_total` | counter | `zone` — the difference is the saving |
+| `cloudflint_connections_total` | counter | |
+| `cloudflint_connections_refused_total` | counter | `reason` (`too_many`/`too_fast`) |
+| `cloudflint_connections_active` | gauge | |
+| `cloudflint_tls_handshake_failures_total` | counter | `reason` (`failed`/`timeout`) |
+| `cloudflint_cache_entries`, `cloudflint_cache_bytes` | gauge | |
+| `cloudflint_zones`, `cloudflint_uptime_seconds` | gauge | |
+| `cloudflint_events_recorded_total`, `cloudflint_events_dropped_total` | counter | |
+| `cloudflint_metrics_series_dropped_total` | counter | above zero means a series hit its cardinality cap |
+| `cloudflint_build_info` | gauge | `version` |
 
 A request that matched no zone is labelled `zone="unrouted"`. From the control plane:
-`cloudveil_api_events_ingested_total`, `cloudveil_api_config_writes_total{kind}`,
-`cloudveil_api_purges_total{outcome}`, `cloudveil_api_uptime_seconds`,
-`cloudveil_api_edges_configured`, `cloudveil_api_active_revision`,
-`cloudveil_api_build_info`.
+`cloudflint_api_events_ingested_total`, `cloudflint_api_config_writes_total{kind}`,
+`cloudflint_api_purges_total{outcome}`, `cloudflint_api_uptime_seconds`,
+`cloudflint_api_edges_configured`, `cloudflint_api_active_revision`,
+`cloudflint_api_build_info`.
 
 ## Tests
 

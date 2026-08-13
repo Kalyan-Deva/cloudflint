@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use cloudveil_edge::metrics::{self, Counter};
+use cloudflint_edge::metrics::{self, Counter};
 
 pub struct ApiMetrics {
     pub started: Instant,
@@ -23,17 +23,17 @@ impl ApiMetrics {
         Arc::new(ApiMetrics {
             started: Instant::now(),
             events: Counter::new(
-                "cloudveil_api_events_ingested_total",
+                "cloudflint_api_events_ingested_total",
                 "Request events accepted from edges.",
                 &[],
             ),
             config_writes: Counter::new(
-                "cloudveil_api_config_writes_total",
+                "cloudflint_api_config_writes_total",
                 "Config revisions stored or activated, by what happened.",
                 &["kind"],
             ),
             purges: Counter::new(
-                "cloudveil_api_purges_total",
+                "cloudflint_api_purges_total",
                 "Purges fanned out to edges, by whether every edge agreed.",
                 &["outcome"],
             ),
@@ -50,27 +50,27 @@ impl ApiMetrics {
 
         metrics::gauge(
             &mut out,
-            "cloudveil_api_uptime_seconds",
+            "cloudflint_api_uptime_seconds",
             "Seconds since this control plane started.",
             self.started.elapsed().as_secs_f64(),
         );
         metrics::gauge(
             &mut out,
-            "cloudveil_api_edges_configured",
+            "cloudflint_api_edges_configured",
             "Edge admin urls this control plane will fan purges out to.",
             edges as f64,
         );
         if let Some(revision) = revisions {
             metrics::gauge(
                 &mut out,
-                "cloudveil_api_active_revision",
+                "cloudflint_api_active_revision",
                 "Id of the config revision the edges are being served.",
                 revision as f64,
             );
         }
         metrics::labelled_gauge(
             &mut out,
-            "cloudveil_api_build_info",
+            "cloudflint_api_build_info",
             "Always 1; the version is in the label.",
             &[("version", env!("CARGO_PKG_VERSION"))],
             1.0,

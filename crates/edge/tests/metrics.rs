@@ -6,8 +6,8 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use cloudveil_edge::snapshot::Snapshot;
-use cloudveil_edge::{admin, config, serve, Edge};
+use cloudflint_edge::snapshot::Snapshot;
+use cloudflint_edge::{admin, config, serve, Edge};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
@@ -18,7 +18,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
 
-const TOKEN: &str = "cv_metricstoken0123456789abcdef0123456789abcdef0123456789abcd";
+const TOKEN: &str = "cfl_metricstoken0123456789abcdef0123456789abcdef0123456789abcd";
 
 async fn spawn_origin() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -170,17 +170,17 @@ async fn a_scrape_reports_what_the_request_path_did() {
     assert!(kind.starts_with("text/plain"), "content type was {kind}");
 
     assert_eq!(
-        sample(&body, r#"cloudveil_requests_total{zone="demo",status="403",decided_by="waf"}"#),
+        sample(&body, r#"cloudflint_requests_total{zone="demo",status="403",decided_by="waf"}"#),
         Some(1.0),
         "the waf block is missing:\n{body}"
     );
     assert_eq!(
-        sample(&body, r#"cloudveil_requests_total{zone="unrouted",status="404",decided_by="route"}"#),
+        sample(&body, r#"cloudflint_requests_total{zone="unrouted",status="404",decided_by="route"}"#),
         Some(1.0),
         "a request that matched no zone should still be counted:\n{body}"
     );
     assert_eq!(
-        sample(&body, r#"cloudveil_requests_total{zone="demo",status="429",decided_by="ratelimit"}"#),
+        sample(&body, r#"cloudflint_requests_total{zone="demo",status="429",decided_by="ratelimit"}"#),
         Some(1.0)
     );
 
@@ -188,36 +188,36 @@ async fn a_scrape_reports_what_the_request_path_did() {
        the counters say the same: /page, /robots.txt and /limited missed once each,
        and the second /page and second /limited hit */
     assert_eq!(
-        sample(&body, r#"cloudveil_cache_results_total{zone="demo",result="hit"}"#),
+        sample(&body, r#"cloudflint_cache_results_total{zone="demo",result="hit"}"#),
         Some(2.0),
         "cache hits are wrong:\n{body}"
     );
     assert_eq!(
-        sample(&body, r#"cloudveil_cache_results_total{zone="demo",result="miss"}"#),
+        sample(&body, r#"cloudflint_cache_results_total{zone="demo",result="miss"}"#),
         Some(3.0)
     );
 
     assert_eq!(
-        sample(&body, r#"cloudveil_waf_matches_total{zone="demo",rule="block-teapots",severity="high",action="block"}"#),
+        sample(&body, r#"cloudflint_waf_matches_total{zone="demo",rule="block-teapots",severity="high",action="block"}"#),
         Some(1.0)
     );
     assert_eq!(
-        sample(&body, r#"cloudveil_waf_matches_total{zone="demo",rule="watch-robots",severity="low",action="log"}"#),
+        sample(&body, r#"cloudflint_waf_matches_total{zone="demo",rule="watch-robots",severity="low",action="log"}"#),
         Some(1.0),
         "a log-action rule is exactly the one you want a graph of:\n{body}"
     );
     assert_eq!(
-        sample(&body, r#"cloudveil_ratelimit_decisions_total{zone="demo",rule="tight",action="block"}"#),
+        sample(&body, r#"cloudflint_ratelimit_decisions_total{zone="demo",rule="tight",action="block"}"#),
         Some(1.0)
     );
-    assert_eq!(sample(&body, r#"cloudveil_ratelimit_factor{zone="demo"}"#), Some(1.0));
+    assert_eq!(sample(&body, r#"cloudflint_ratelimit_factor{zone="demo"}"#), Some(1.0));
 
     /* one origin fetch per miss - nothing for a hit, a block or a 429. Labelled by
        origin as well as zone, so "which backend" is answerable */
     assert_eq!(
         sample(
             &body,
-            &format!(r#"cloudveil_origin_requests_total{{zone="demo",origin="{origin}"}}"#)
+            &format!(r#"cloudflint_origin_requests_total{{zone="demo",origin="{origin}"}}"#)
         ),
         Some(3.0)
     );
@@ -225,7 +225,7 @@ async fn a_scrape_reports_what_the_request_path_did() {
         sample(
             &body,
             &format!(
-                r#"cloudveil_origin_errors_total{{zone="demo",origin="{origin}",kind="unreachable"}}"#
+                r#"cloudflint_origin_errors_total{{zone="demo",origin="{origin}",kind="unreachable"}}"#
             )
         ),
         None
@@ -234,7 +234,7 @@ async fn a_scrape_reports_what_the_request_path_did() {
     assert_eq!(
         sample(
             &body,
-            &format!(r#"cloudveil_origin_healthy{{zone="demo",origin="{origin}"}}"#)
+            &format!(r#"cloudflint_origin_healthy{{zone="demo",origin="{origin}"}}"#)
         ),
         Some(1.0),
         "a healthy origin needs a series too, or there is nothing to alert on:\n{body}"
@@ -242,29 +242,29 @@ async fn a_scrape_reports_what_the_request_path_did() {
 
     /* the histogram's +Inf bucket is every request that reached a zone */
     assert_eq!(
-        sample(&body, r#"cloudveil_request_duration_seconds_bucket{zone="demo",le="+Inf"}"#),
+        sample(&body, r#"cloudflint_request_duration_seconds_bucket{zone="demo",le="+Inf"}"#),
         Some(7.0)
     );
     assert_eq!(
-        sample(&body, r#"cloudveil_request_duration_seconds_count{zone="demo"}"#),
+        sample(&body, r#"cloudflint_request_duration_seconds_count{zone="demo"}"#),
         Some(7.0)
     );
 
-    assert_eq!(sample(&body, "cloudveil_cache_entries"), Some(3.0), "three urls were cached");
-    assert!(sample(&body, "cloudveil_cache_bytes").unwrap_or(0.0) > 0.0);
-    assert_eq!(sample(&body, "cloudveil_zones"), Some(1.0));
+    assert_eq!(sample(&body, "cloudflint_cache_entries"), Some(3.0), "three urls were cached");
+    assert!(sample(&body, "cloudflint_cache_bytes").unwrap_or(0.0) > 0.0);
+    assert_eq!(sample(&body, "cloudflint_zones"), Some(1.0));
     assert_eq!(
-        sample(&body, "cloudveil_events_recorded_total"),
+        sample(&body, "cloudflint_events_recorded_total"),
         Some(8.0),
         "seven requests to the zone plus the one that matched none"
     );
-    assert_eq!(sample(&body, "cloudveil_metrics_series_dropped_total"), Some(0.0));
-    assert!(sample(&body, "cloudveil_uptime_seconds").is_some());
-    assert!(body.contains("cloudveil_build_info{version="));
+    assert_eq!(sample(&body, "cloudflint_metrics_series_dropped_total"), Some(0.0));
+    assert!(sample(&body, "cloudflint_uptime_seconds").is_some());
+    assert!(body.contains("cloudflint_build_info{version="));
 
     /* connections were counted at accept time and released when they closed */
-    assert!(sample(&body, "cloudveil_connections_total").unwrap_or(0.0) >= 1.0);
-    assert!(sample(&body, "cloudveil_connections_active").is_some());
+    assert!(sample(&body, "cloudflint_connections_total").unwrap_or(0.0) >= 1.0);
+    assert!(sample(&body, "cloudflint_connections_active").is_some());
 }
 
 #[tokio::test]
@@ -283,14 +283,14 @@ async fn a_dead_origin_shows_up_as_an_origin_error() {
         sample(
             &body,
             &format!(
-                r#"cloudveil_origin_errors_total{{zone="demo",origin="{dead}",kind="unreachable"}}"#
+                r#"cloudflint_origin_errors_total{{zone="demo",origin="{dead}",kind="unreachable"}}"#
             )
         ),
         Some(1.0),
         "an unreachable origin should be an origin error, not just a 502:\n{body}"
     );
     assert_eq!(
-        sample(&body, r#"cloudveil_requests_total{zone="demo",status="502",decided_by="cache"}"#),
+        sample(&body, r#"cloudflint_requests_total{zone="demo",status="502",decided_by="cache"}"#),
         Some(1.0)
     );
 }
@@ -310,7 +310,7 @@ async fn a_scrape_needs_a_token_unless_it_is_opened() {
     std::env::remove_var(admin::METRICS_OPEN_VAR);
 
     assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("# TYPE cloudveil_requests_total counter"));
+    assert!(body.contains("# TYPE cloudflint_requests_total counter"));
 
     let (status, _, _) = scrape(admin, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);

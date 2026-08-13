@@ -9,8 +9,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cloudveil_edge::snapshot::Snapshot;
-use cloudveil_edge::{config, serve, Edge};
+use cloudflint_edge::snapshot::Snapshot;
+use cloudflint_edge::{config, serve, Edge};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
@@ -37,7 +37,7 @@ struct Pem {
 fn make_cert(tag: &str, name: &str) -> Pem {
     let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!(
-        "cloudveil-origintls-{tag}-{}-{unique}",
+        "cloudflint-origintls-{tag}-{}-{unique}",
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).unwrap();
@@ -66,14 +66,14 @@ impl Drop for Pem {
 /// An https origin. With `require_client_cert`, only clients holding a certificate signed
 /// by `client_ca` get in - mTLS from the origin's side.
 async fn spawn_tls_origin(pem: &Pem, client_ca: Option<&str>) -> SocketAddr {
-    cloudveil_edge::tls::install_crypto_provider();
+    cloudflint_edge::tls::install_crypto_provider();
 
-    let chain = cloudveil_edge::cp::load_certs(&pem.cert).unwrap();
-    let key = cloudveil_edge::cp::load_key(&pem.key).unwrap();
+    let chain = cloudflint_edge::cp::load_certs(&pem.cert).unwrap();
+    let key = cloudflint_edge::cp::load_key(&pem.key).unwrap();
 
     let config = match client_ca {
         Some(ca) => rustls::ServerConfig::builder()
-            .with_client_cert_verifier(cloudveil_edge::cp::client_verifier(ca).unwrap())
+            .with_client_cert_verifier(cloudflint_edge::cp::client_verifier(ca).unwrap())
             .with_single_cert(chain, key)
             .unwrap(),
         None => rustls::ServerConfig::builder()
@@ -209,7 +209,7 @@ async fn a_certificate_for_the_wrong_name_is_refused() {
 #[tokio::test]
 async fn an_origin_demanding_a_client_certificate_gets_one() {
     let server = make_cert("mtls-server", "localhost");
-    let client = make_cert("mtls-client", "cloudveil-edge");
+    let client = make_cert("mtls-client", "cloudflint-edge");
     let origin = spawn_tls_origin(&server, Some(&client.ca)).await;
 
     /* without a client certificate first, to prove the origin really is demanding one */

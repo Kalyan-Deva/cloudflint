@@ -1,13 +1,13 @@
 //! Log setup, shared by both binaries.
 //!
 //! Human-readable stays the default, because the person most likely to read a log
-//! locally is whoever just started the process. Set `CLOUDVEIL_LOG_FORMAT=json` and
+//! locally is whoever just started the process. Set `CLOUDFLINT_LOG_FORMAT=json` and
 //! every line becomes one JSON object instead, which is what a log shipper wants -
 //! same events, same fields, no parsing of a format that was never meant to be parsed.
 
 use tracing_subscriber::EnvFilter;
 
-pub const FORMAT_VAR: &str = "CLOUDVEIL_LOG_FORMAT";
+pub const FORMAT_VAR: &str = "CLOUDFLINT_LOG_FORMAT";
 
 /// Install the subscriber. Call once, first thing in `main`.
 pub fn init() {

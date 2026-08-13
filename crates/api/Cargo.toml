@@ -1,20 +1,20 @@
 [package]
-name = "cloudveil-api"
+name = "cloudflint-api"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Cloudveil control plane - config revisions, analytics, purge"
+description = "Cloudflint control plane - config revisions, analytics, purge"
 
 [lib]
-name = "cloudveil_api"
+name = "cloudflint_api"
 path = "src/lib.rs"
 
 [[bin]]
-name = "cloudveil-api"
+name = "cloudflint-api"
 path = "src/main.rs"
 
 [dependencies]
-cloudveil-edge = { path = "../edge" }
+cloudflint-edge = { path = "../edge" }
 axum = "0.8"
 tokio.workspace = true
 rusqlite = { version = "0.37", features = ["bundled"] }

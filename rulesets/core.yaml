@@ -1,4 +1,4 @@
-# Cloudveil core ruleset - enabled by default on every zone.
+# Cloudflint core ruleset - enabled by default on every zone.
 #
 # Head-only: nothing here looks at the request body, so enabling it never makes the
 # edge buffer uploads. Body inspection lives in core-body.yaml, opt-in.

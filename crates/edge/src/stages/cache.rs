@@ -1,4 +1,4 @@
-﻿//! Cache stage.
+//! Cache stage.
 //!
 //! On a miss this stage goes to the origin itself rather than waving the request on,
 //! so the whole miss path - coalescing, storing, falling back to stale - lives in one
@@ -23,7 +23,7 @@ use crate::stages::origin::{Fetcher, Upstream};
 
 /// Header we report the cache decision in. Handy in a browser, and the integration
 /// tests lean on it heavily.
-const STATUS_HEADER: &str = "cloudveil-cache";
+const STATUS_HEADER: &str = "cloudflint-cache";
 
 /// Origin responses that count as "the origin is having a bad time" for the purposes
 /// of stale-if-error (RFC 5861).

@@ -1,5 +1,5 @@
-# Cloudveil edge - example config.
-# Copy to cloudveil.local.yaml for anything real; that name is gitignored.
+# Cloudflint edge - example config.
+# Copy to cloudflint.local.yaml for anything real; that name is gitignored.
 
 listen: "127.0.0.1:8080"
 
@@ -40,7 +40,7 @@ limits:
 # keys on this: rate limit buckets, ip.src rules, the live log.
 #
 # With no trusted_proxies - the default - the header is never read and the peer on the
-# socket is the client. That is right when Cloudveil is the first thing traffic touches,
+# socket is the client. That is right when Cloudflint is the first thing traffic touches,
 # and wrong the moment it is behind a load balancer, where every client collapses into
 # one rate limit bucket.
 #
@@ -106,7 +106,7 @@ zones:
     #     healthy_after: 2
 
     # Certificates are per zone and picked by SNI. Make one for local work with:
-    #   cargo run -p cloudveil-edge --bin cloudveil-cert -- certs demo.local localhost
+    #   cargo run -p cloudflint-edge --bin cloudflint-cert -- certs demo.local localhost
     # Edit either file and the edge reloads it without dropping a connection.
     tls:
       cert: "certs/demo.local.crt"

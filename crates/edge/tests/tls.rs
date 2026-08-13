@@ -9,9 +9,9 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cloudveil_edge::snapshot::Snapshot;
-use cloudveil_edge::tls::{install_crypto_provider, Tls};
-use cloudveil_edge::{config, serve, serve_redirect, serve_tls, Edge};
+use cloudflint_edge::snapshot::Snapshot;
+use cloudflint_edge::tls::{install_crypto_provider, Tls};
+use cloudflint_edge::{config, serve, serve_redirect, serve_tls, Edge};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
@@ -64,7 +64,7 @@ static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0)
 fn make_certs(tag: &str, names: &[&str]) -> Certs {
     let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!(
-        "cloudveil-tlsint-{tag}-{}-{unique}",
+        "cloudflint-tlsint-{tag}-{}-{unique}",
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).unwrap();

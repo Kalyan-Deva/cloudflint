@@ -9,8 +9,8 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use cloudveil_edge::snapshot::Snapshot;
-use cloudveil_edge::{config, serve, Edge};
+use cloudflint_edge::snapshot::Snapshot;
+use cloudflint_edge::{config, serve, Edge};
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
@@ -131,13 +131,13 @@ async fn an_upgrade_survives_the_proxy_and_bytes_flow_both_ways() {
         .expect("client side should upgrade");
     let mut io = TokioIo::new(upgraded);
 
-    io.write_all(b"hello through the veil").await.unwrap();
+    io.write_all(b"hello through the sparks").await.unwrap();
     let mut buf = vec![0u8; 64];
     let n = io.read(&mut buf).await.unwrap();
 
     assert_eq!(
         String::from_utf8_lossy(&buf[..n]),
-        "HELLO THROUGH THE VEIL",
+        "HELLO THROUGH THE SPARKS",
         "the origin should have seen our bytes and answered"
     );
 }

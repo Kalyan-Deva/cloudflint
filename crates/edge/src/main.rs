@@ -2,9 +2,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use cloudveil_edge::snapshot::{self, Snapshot};
-use cloudveil_edge::tls::{self, Tls};
-use cloudveil_edge::{admin, config, logging, serve, serve_redirect, serve_tls, Edge};
+use cloudflint_edge::snapshot::{self, Snapshot};
+use cloudflint_edge::tls::{self, Tls};
+use cloudflint_edge::{admin, config, logging, serve, serve_redirect, serve_tls, Edge};
 use tokio::net::TcpListener;
 use tracing::info;
 
@@ -14,7 +14,7 @@ async fn main() -> Result<()> {
 
     let path: PathBuf = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "cloudveil.yaml".to_owned())
+        .unwrap_or_else(|| "cloudflint.yaml".to_owned())
         .into();
 
     tls::install_crypto_provider();
@@ -29,13 +29,13 @@ async fn main() -> Result<()> {
        edge starting instead of failing the first handshake of the day */
     let tls = Tls::new(&cfg)?.map(Arc::new);
     /* and the same for the certificates we present *to* origins */
-    cloudveil_edge::origin_tls::preflight(&cfg)?;
+    cloudflint_edge::origin_tls::preflight(&cfg)?;
 
     let listener = TcpListener::bind(listen)
         .await
         .with_context(|| format!("binding {listen}"))?;
 
-    info!("cloudveil edge listening on {listen}");
+    info!("cloudflint edge listening on {listen}");
     info!(
         "cache store: {} MiB, objects up to {} MiB",
         cfg.cache.max_bytes / (1024 * 1024),

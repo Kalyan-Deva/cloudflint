@@ -1,4 +1,4 @@
-﻿//! Talking to the origin.
+//! Talking to the origin.
 //!
 //! `Fetcher` is the bit that does it, shared rather than owned by the stage, because
 //! the cache needs to make origin requests of its own for background revalidation.

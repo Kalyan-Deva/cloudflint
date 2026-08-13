@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use cloudveil_api::db::Db;
-use cloudveil_api::{router, Api};
-use cloudveil_edge::shutdown::Shutdown;
+use cloudflint_api::db::Db;
+use cloudflint_api::{router, Api};
+use cloudflint_edge::shutdown::Shutdown;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
@@ -12,26 +12,26 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
 
 /// Bootstrap token, read once when the database has none.
-const BOOTSTRAP_VAR: &str = "CLOUDVEIL_API_TOKEN";
-const TLS_CERT_VAR: &str = "CLOUDVEIL_API_TLS_CERT";
-const TLS_KEY_VAR: &str = "CLOUDVEIL_API_TLS_KEY";
+const BOOTSTRAP_VAR: &str = "CLOUDFLINT_API_TOKEN";
+const TLS_CERT_VAR: &str = "CLOUDFLINT_API_TLS_CERT";
+const TLS_KEY_VAR: &str = "CLOUDFLINT_API_TLS_KEY";
 /// Naming a CA here turns on mTLS: only clients holding a certificate it signed get in.
-const CLIENT_CA_VAR: &str = "CLOUDVEIL_API_CLIENT_CA";
+const CLIENT_CA_VAR: &str = "CLOUDFLINT_API_CLIENT_CA";
 /// The token this process presents to the edges' admin APIs when purging.
-const EDGE_TOKEN_VAR: &str = "CLOUDVEIL_EDGE_TOKEN";
+const EDGE_TOKEN_VAR: &str = "CLOUDFLINT_EDGE_TOKEN";
 /// Not configurable: nothing here is worth waiting on for long. A config write either
 /// finished or it didn't, and the client will find out which.
 const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Usage: cloudveil-api [listen] [db path] [edge admin url, ...]
+/// Usage: cloudflint-api [listen] [db path] [edge admin url, ...]
 #[tokio::main]
 async fn main() -> Result<()> {
-    cloudveil_edge::logging::init();
-    cloudveil_edge::tls::install_crypto_provider();
+    cloudflint_edge::logging::init();
+    cloudflint_edge::tls::install_crypto_provider();
 
     let mut args = std::env::args().skip(1);
     let listen = args.next().unwrap_or_else(|| "127.0.0.1:9000".to_owned());
-    let db_path = args.next().unwrap_or_else(|| "cloudveil.db".to_owned());
+    let db_path = args.next().unwrap_or_else(|| "cloudflint.db".to_owned());
     let edges: Vec<String> = args.collect();
 
     let db = Db::open(&db_path).with_context(|| format!("opening {db_path}"))?;
@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("binding {listen}"))?;
 
-    info!("cloudveil control plane on {listen}, storing to {db_path}");
+    info!("cloudflint control plane on {listen}, storing to {db_path}");
     match edges.len() {
         0 => info!("no edge admin urls given - purge will have nowhere to go"),
         _ => info!("purging to: {}", edges.join(", ")),
@@ -96,7 +96,7 @@ fn bootstrap_token(db: &Db) -> Result<()> {
         }
         Ok(_) => anyhow::bail!("{BOOTSTRAP_VAR} is too short to be a token"),
         Err(_) => {
-            let token = cloudveil_edge::auth::generate();
+            let token = cloudflint_edge::auth::generate();
             db.add_token("bootstrap", &token, now)?;
             println!();
             println!("  No tokens existed, so one has been made for you:");
@@ -104,8 +104,8 @@ fn bootstrap_token(db: &Db) -> Result<()> {
             println!("      {token}");
             println!();
             println!("  This is the only time it will be shown - only its hash is stored.");
-            println!("  Give it to your edges as CLOUDVEIL_CP_TOKEN and to the dashboard");
-            println!("  as CLOUDVEIL_API_TOKEN.");
+            println!("  Give it to your edges as CLOUDFLINT_CP_TOKEN and to the dashboard");
+            println!("  as CLOUDFLINT_API_TOKEN.");
             println!();
         }
     }
@@ -116,14 +116,14 @@ fn acceptor() -> Result<Option<TlsAcceptor>> {
     let (Ok(cert), Ok(key)) = (std::env::var(TLS_CERT_VAR), std::env::var(TLS_KEY_VAR)) else {
         return Ok(None);
     };
-    let chain = cloudveil_edge::cp::load_certs(&cert)?;
-    let key = cloudveil_edge::cp::load_key(&key)?;
+    let chain = cloudflint_edge::cp::load_certs(&cert)?;
+    let key = cloudflint_edge::cp::load_key(&key)?;
 
     let config = match std::env::var(CLIENT_CA_VAR) {
         Ok(ca) => {
             info!("requiring client certificates signed by {ca}");
             rustls::ServerConfig::builder()
-                .with_client_cert_verifier(cloudveil_edge::cp::client_verifier(&ca)?)
+                .with_client_cert_verifier(cloudflint_edge::cp::client_verifier(&ca)?)
                 .with_single_cert(chain, key)?
         }
         Err(_) => {

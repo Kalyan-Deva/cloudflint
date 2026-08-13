@@ -168,7 +168,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("cloudveil-{tag}-{}-{unique}.yaml", std::process::id()))
+        std::env::temp_dir().join(format!("cloudflint-{tag}-{}-{unique}.yaml", std::process::id()))
     }
 
     fn cfg_with(zone: &str) -> String {

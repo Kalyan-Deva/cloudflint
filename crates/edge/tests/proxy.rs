@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use cloudveil_edge::snapshot::{self, Snapshot};
-use cloudveil_edge::{config, serve, Edge};
+use cloudflint_edge::snapshot::{self, Snapshot};
+use cloudflint_edge::{config, serve, Edge};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
@@ -115,7 +115,7 @@ async fn forwards_to_the_origin() {
     assert!(body.contains("xff=127.0.0.1"), "body was {body}");
     assert!(body.contains("xfp=http"), "body was {body}");
     assert_eq!(headers.get("x-origin").unwrap(), "a");
-    assert_eq!(headers.get("server").unwrap(), "cloudveil");
+    assert_eq!(headers.get("server").unwrap(), "cloudflint");
 }
 
 #[tokio::test]
@@ -174,7 +174,7 @@ async fn moves_traffic_to_a_new_origin_on_reload() {
     let b = spawn_origin("b").await;
 
     let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let path: PathBuf = std::env::temp_dir().join(format!("cloudveil-e2e-{unique}.yaml"));
+    let path: PathBuf = std::env::temp_dir().join(format!("cloudflint-e2e-{unique}.yaml"));
     std::fs::write(&path, zone_yaml(a, true)).unwrap();
 
     let snap = Arc::new(Snapshot::new(config::load(&path).unwrap()));

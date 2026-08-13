@@ -5,9 +5,9 @@
  * the client, and it means neither of them needs CORS headers just so a dashboard
  * on another port can read them.
  */
-const CP = process.env.CLOUDVEIL_CP ?? "http://127.0.0.1:9000";
+const CP = process.env.CLOUDFLINT_CP ?? "http://127.0.0.1:9000";
 /* attached here, on the server, so the token never reaches the browser */
-const TOKEN = process.env.CLOUDVEIL_API_TOKEN ?? "";
+const TOKEN = process.env.CLOUDFLINT_API_TOKEN ?? "";
 
 async function forward(req: Request, path: string[]) {
   const url = new URL(req.url);

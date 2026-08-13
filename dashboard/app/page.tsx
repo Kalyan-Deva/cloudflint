@@ -241,7 +241,7 @@ function Hero({
           </div>
 
           <p className="text-[12.5px] text-muted mt-1.5">
-            Zone on Cloudveil {revision !== undefined && `· config revision ${revision}`}
+            Zone on Cloudflint {revision !== undefined && `· config revision ${revision}`}
           </p>
           <p className="text-[12.5px] text-muted mt-2 max-w-[560px]">
             Fronting <span className="text-text">{zone?.origin ?? "—"}</span>. Requests are rate

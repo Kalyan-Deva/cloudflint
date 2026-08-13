@@ -14,7 +14,7 @@
 //! scrape endpoint on the traffic port would be reachable by everyone the proxy is
 //! for. It is token-guarded like everything else, because Prometheus can hold a bearer
 //! token and a scrape is a list of your zones, rule ids and traffic shape. Setting
-//! `CLOUDVEIL_METRICS_OPEN=1` opens that one endpoint, for the case where the admin
+//! `CLOUDFLINT_METRICS_OPEN=1` opens that one endpoint, for the case where the admin
 //! listener is already on an interface only the monitoring network can reach.
 
 use std::sync::Arc;
@@ -52,9 +52,9 @@ pub struct PurgeRequest {
 }
 
 /// Where the admin token comes from. Not the config file - see `auth`.
-pub const TOKEN_VAR: &str = "CLOUDVEIL_ADMIN_TOKEN";
+pub const TOKEN_VAR: &str = "CLOUDFLINT_ADMIN_TOKEN";
 /// Set to `1` to serve `/metrics` without a token. See the module note.
-pub const METRICS_OPEN_VAR: &str = "CLOUDVEIL_METRICS_OPEN";
+pub const METRICS_OPEN_VAR: &str = "CLOUDFLINT_METRICS_OPEN";
 
 fn metrics_are_open() -> bool {
     matches!(std::env::var(METRICS_OPEN_VAR).as_deref(), Ok("1") | Ok("true"))
@@ -358,32 +358,32 @@ fn metrics(edge: &Edge, started: Instant) -> Response<Body> {
     let stats = edge.store.stats();
     m::gauge(
         &mut body,
-        "cloudveil_cache_entries",
+        "cloudflint_cache_entries",
         "Responses currently held in the cache.",
         stats.entries as f64,
     );
     m::gauge(
         &mut body,
-        "cloudveil_cache_bytes",
+        "cloudflint_cache_bytes",
         "Bytes of cached response bodies and headers.",
         stats.bytes as f64,
     );
 
     m::gauge(
         &mut body,
-        "cloudveil_zones",
+        "cloudflint_zones",
         "Zones in the config this node is serving.",
         cfg.zones.len() as f64,
     );
     m::gauge(
         &mut body,
-        "cloudveil_uptime_seconds",
+        "cloudflint_uptime_seconds",
         "Seconds since this node's admin api came up.",
         started.elapsed().as_secs_f64(),
     );
     m::gauge(
         &mut body,
-        "cloudveil_draining",
+        "cloudflint_draining",
         "1 while this node is shutting down and finishing its live connections.",
         match edge.shutdown.draining() {
             true => 1.0,
@@ -394,26 +394,26 @@ fn metrics(edge: &Edge, started: Instant) -> Response<Body> {
     let (seen, dropped) = edge.analytics.counts();
     m::counter(
         &mut body,
-        "cloudveil_events_recorded_total",
+        "cloudflint_events_recorded_total",
         "Request events recorded.",
         seen as f64,
     );
     m::counter(
         &mut body,
-        "cloudveil_events_dropped_total",
+        "cloudflint_events_dropped_total",
         "Request events shed because the queue to the control plane was full.",
         dropped as f64,
     );
     m::counter(
         &mut body,
-        "cloudveil_metrics_series_dropped_total",
+        "cloudflint_metrics_series_dropped_total",
         "Records dropped because a metric hit its series cap. Above zero means a \
          series is missing rather than idle.",
         edge.metrics.dropped_series() as f64,
     );
     m::labelled_gauge(
         &mut body,
-        "cloudveil_build_info",
+        "cloudflint_build_info",
         "Always 1; the version is in the label.",
         &[("version", env!("CARGO_PKG_VERSION"))],
         1.0,
