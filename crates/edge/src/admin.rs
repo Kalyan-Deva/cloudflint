@@ -164,6 +164,8 @@ async fn route(
 
         (&Method::GET, "/admin/origins") => ok(origins(&edge)),
 
+        (&Method::GET, "/admin/certificates") => ok(certificates(&edge)),
+
         (&Method::GET, "/metrics") => metrics(&edge, started),
 
         (&Method::GET, "/admin/stream") => stream(&edge),
@@ -172,6 +174,79 @@ async fn route(
 
         _ => problem(StatusCode::NOT_FOUND, "no such endpoint"),
     }
+}
+
+/// Certificates: the ones we present to clients, and how we talk to origins.
+///
+/// Reported from the certificates actually **loaded and serving**, not from what config
+/// asks for. Those differ exactly when something is wrong, which is when somebody looks.
+fn certificates(edge: &Edge) -> serde_json::Value {
+    let cfg = edge.snap.current();
+    let live = edge.tls.as_ref().map(|t| t.report()).unwrap_or_default();
+
+    let zones: Vec<_> = cfg
+        .zones
+        .iter()
+        .map(|zone| {
+            let cert = live.iter().find(|c| c.zone == zone.name);
+            let origin_tls = &zone.origin_tls;
+            let https_origin = zone
+                .origins
+                .origins
+                .iter()
+                .any(|o| o.scheme == hyper::http::uri::Scheme::HTTPS);
+
+            json!({
+                "zone": zone.name,
+                "hostnames": zone.hostnames,
+                /* manual until acme lands; the field exists so the answer has a place
+                   to change rather than a shape to change */
+                "mode": match zone.tls.is_some() {
+                    true => "manual",
+                    false => "off",
+                },
+                "configured": zone.tls.as_ref().map(|t| t.cert.display().to_string()),
+                /* the load-bearing one: config naming a certificate is not the same as
+                   that certificate being the one in use */
+                "deployed": cert.is_some(),
+                "status": cert.map(|c| c.status()).unwrap_or(match zone.tls.is_some() {
+                    true => "not_loaded",
+                    false => "none",
+                }),
+                "subject": cert.map(|c| c.subject.clone()),
+                "issuer": cert.map(|c| c.issuer.clone()),
+                "self_signed": cert.map(|c| c.self_signed),
+                "dns_names": cert.map(|c| c.dns_names.clone()).unwrap_or_default(),
+                "not_before_ms": cert.map(|c| c.not_before_ms),
+                "not_after_ms": cert.map(|c| c.not_after_ms),
+                "days_left": cert.map(|c| c.days_left()),
+                /* nothing renews these yet, and saying so is better than an empty field
+                   somebody reads as "soon" */
+                "renews_at_ms": serde_json::Value::Null,
+                "renewal": "manual",
+                "origin": {
+                    "https": https_origin,
+                    "verify": origin_tls.verify,
+                    "ca": origin_tls.ca.as_ref().map(|p| p.display().to_string()),
+                    "mtls": origin_tls.client_cert.is_some(),
+                    "mode": match (https_origin, origin_tls.verify, origin_tls.client_cert.is_some()) {
+                        (false, _, _) => "plaintext",
+                        (true, false, _) => "encrypted, not verified",
+                        (true, true, false) => "verified",
+                        (true, true, true) => "verified, mutual",
+                    },
+                },
+            })
+        })
+        .collect();
+
+    json!({
+        "listener": cfg.tls.as_ref().map(|t| json!({
+            "listen": t.listen.to_string(),
+            "redirect_http": t.redirect_http,
+        })),
+        "zones": zones,
+    })
 }
 
 /// Everything known about each zone's backends, for the dashboard.

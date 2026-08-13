@@ -64,6 +64,11 @@ async fn main() -> Result<()> {
     edge.shutdown.listen();
     let drain_timeout = edge.node_limits().drain_timeout;
 
+    /* certificates follow both the config and the files it points at - see tls::watch */
+    if let Some(tls) = &tls {
+        tls::watch(tls.clone(), snap.clone(), std::time::Duration::from_secs(5));
+    }
+
     match &control_plane {
         Some(url) => {
             info!("control plane at {url} - pulling config and shipping analytics there");

@@ -38,7 +38,10 @@ const NAV = [
   },
   {
     section: "security",
-    items: [{ href: "/waf", label: "WAF rules", icon: Shield }],
+    items: [
+      { href: "/waf", label: "WAF rules", icon: Shield },
+      { href: "/certificates", label: "Certificates", icon: Lock },
+    ],
   },
   {
     section: "control",
@@ -238,6 +241,14 @@ function Pulse() {
   return (
     <svg {...ico}>
       <path d="M1.5 8h3l1.5-4 2.5 8 1.5-4h3.5" {...line} />
+    </svg>
+  );
+}
+function Lock() {
+  return (
+    <svg {...ico}>
+      <rect x="3" y="7" width="10" height="7" rx="1.5" {...line} />
+      <path d="M5.5 7V5a2.5 2.5 0 015 0v2" {...line} />
     </svg>
   );
 }

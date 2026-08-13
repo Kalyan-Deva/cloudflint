@@ -335,8 +335,13 @@ Two more environment variables, neither of them secret:
 | `POST /v1/purge` | `{url}`, `{tag}`, `{zone}` or `{all:true}` |
 | `GET/POST/DELETE /v1/tokens` | mint, list, revoke |
 
-Edge admin API: `/admin/health`, `/admin/stats`, `/admin/origins`, `/admin/recent`,
-`/admin/stream` (SSE), `/admin/purge`, `/metrics`.
+Edge admin API: `/admin/health`, `/admin/stats`, `/admin/origins`,
+`/admin/certificates`, `/admin/recent`, `/admin/stream` (SSE), `/admin/purge`, `/metrics`.
+
+`/admin/certificates` reports what is **loaded and serving** — subject, issuer, validity,
+days left, the names the certificate actually covers, whether it is self-signed — plus how
+each zone talks to its origins. Reported from the live certificates rather than from
+config, because the two differ exactly when something is wrong.
 
 `/admin/origins` is the origin dashboard's data: per backend, whether it is in rotation,
 requests, errors and error rate, traffic share, in-flight count, p50/p95 estimated from the
