@@ -60,6 +60,29 @@ async fn spawn_origin(tag: &'static str) -> SocketAddr {
     addr
 }
 
+/// An origin stuck on HTTP/1.0 - python's http.server is the one everybody meets.
+async fn spawn_old_origin() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let svc = service_fn(|_req: Request<Incoming>| async {
+                    Ok::<_, Infallible>(
+                        Response::builder()
+                            .version(hyper::Version::HTTP_10)
+                            .body(Full::new(Bytes::from("old")))
+                            .unwrap(),
+                    )
+                });
+                let _ = http1::Builder::new().serve_connection(io, svc).await;
+            });
+        }
+    });
+    addr
+}
+
 fn zone_yaml(origin: SocketAddr, preserve_host: bool) -> String {
     format!(
         "zones:\n  \
@@ -166,6 +189,30 @@ async fn dead_origin_gets_502() {
 
     let (status, _, _) = get(proxy, "demo.local", "/").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn answers_the_client_in_the_clients_own_http_version() {
+    /* the version belongs to the hop, not to the message. Forwarding the origin's meant
+       a 1.0 backend downgraded the client's connection too, and since Connection is
+       stripped as hop-by-hop a 1.0 response with no keep-alive header ends the
+       connection - so every proxied response cost a fresh handshake */
+    let origin = spawn_old_origin().await;
+    let proxy = spawn_proxy(origin, true).await;
+
+    let req = Request::builder()
+        .uri(format!("http://{proxy}/"))
+        .header("host", "demo.local")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let resp = client().request(req).await.expect("proxy should answer");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.version(),
+        hyper::Version::HTTP_11,
+        "the origin's HTTP/1.0 leaked out to the client"
+    );
 }
 
 #[tokio::test]

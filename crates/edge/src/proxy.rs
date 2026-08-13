@@ -40,6 +40,7 @@ pub async fn handle(
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
     let host = host_of(&req).unwrap_or_default();
+    let version = req.version();
 
     /* before routing, before the waf, before anything: a certificate authority checking
        an http-01 challenge is not really a visitor to a zone, and the request has to be
@@ -55,7 +56,7 @@ pub async fn handle(
     let cfg = edge.snap.current();
 
     let mut outcome = route(req, &cfg, &edge, peer, started, tls).await;
-    finalize(&mut outcome.resp);
+    finalize(&mut outcome.resp, version);
 
     let took = started.elapsed();
     let status = outcome.resp.status();
@@ -171,12 +172,21 @@ async fn route(
 }
 
 /// Applies to every response, whoever produced it.
-fn finalize(resp: &mut Response<Body>) {
+fn finalize(resp: &mut Response<Body>, client_version: hyper::Version) {
     /* a 101 is the one response whose hop-by-hop headers are the whole point:
        Connection and Upgrade are what tell the client the switch happened */
     if resp.status() != StatusCode::SWITCHING_PROTOCOLS {
         strip_hop_by_hop(resp.headers_mut());
     }
+
+    /* the protocol version belongs to one hop, not to the message: an origin answering
+       HTTP/1.0 says nothing about what we speak to the client. Forwarding its version
+       verbatim also costs real throughput - 1.0 has no persistent connections without an
+       explicit Connection header, and we have just stripped that as hop-by-hop, so every
+       proxied response through a 1.0 origin closed the client connection while a cache hit
+       on the same zone kept it open */
+    *resp.version_mut() = client_version;
+
     resp.headers_mut()
         .insert(header::SERVER, HeaderValue::from_static("cloudflint"));
 }
