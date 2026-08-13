@@ -88,24 +88,22 @@ pub fn watch_every(path: PathBuf, snap: Arc<Snapshot>, every: Duration) {
 /// dropped, and an unreachable control plane changes nothing. The edge keeps serving
 /// whatever it last agreed with - a control plane outage must not become an outage.
 pub fn watch_remote(base: String, snap: Arc<Snapshot>, every: Duration) {
+    let cp = match crate::cp::ControlPlane::from_env(&base) {
+        Ok(cp) => cp,
+        Err(e) => {
+            warn!("cannot pull config from {base}: {e:#}");
+            return;
+        }
+    };
+
     tokio::spawn(async move {
-        use http_body_util::{BodyExt, Full};
-        use hyper::body::Bytes;
-        use hyper_util::client::legacy::connect::HttpConnector;
-        use hyper_util::client::legacy::Client;
-        use hyper_util::rt::TokioExecutor;
-
-        let client: Client<HttpConnector, Full<Bytes>> =
-            Client::builder(TokioExecutor::new()).build_http();
-        let endpoint = format!("{}/v1/config", base.trim_end_matches('/'));
-
         let mut running = 0i64;
         let mut last_err = String::new();
 
         loop {
             tokio::time::sleep(every).await;
 
-            match fetch(&client, &endpoint).await {
+            match fetch(&cp).await {
                 Ok(Some(pulled)) if pulled.revision != running => {
                     match config::parse(&pulled.yaml) {
                         Ok(cfg) => {
@@ -129,30 +127,8 @@ pub fn watch_remote(base: String, snap: Arc<Snapshot>, every: Duration) {
             }
         }
 
-        async fn fetch(
-            client: &Client<HttpConnector, Full<Bytes>>,
-            endpoint: &str,
-        ) -> Result<Option<Pulled>, String> {
-            let req = hyper::Request::builder()
-                .uri(endpoint)
-                .body(Full::new(Bytes::new()))
-                .map_err(|e| format!("bad control plane url: {e}"))?;
-
-            let resp = client
-                .request(req)
-                .await
-                .map_err(|e| format!("could not reach the control plane: {e}"))?;
-            if !resp.status().is_success() {
-                return Err(format!("control plane answered {}", resp.status()));
-            }
-
-            let body = resp
-                .into_body()
-                .collect()
-                .await
-                .map_err(|e| format!("could not read the control plane's answer: {e}"))?
-                .to_bytes();
-
+        async fn fetch(cp: &crate::cp::ControlPlane) -> Result<Option<Pulled>, String> {
+            let body = cp.get("/v1/config").await.map_err(|e| format!("{e:#}"))?;
             serde_json::from_slice::<Pulled>(&body)
                 .map(Some)
                 .map_err(|e| format!("control plane sent something unexpected: {e}"))

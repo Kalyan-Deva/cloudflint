@@ -3,9 +3,11 @@
 
 pub mod admin;
 pub mod analytics;
+pub mod auth;
 pub mod body;
 pub mod cache;
 pub mod config;
+pub mod cp;
 pub mod limits;
 pub mod pages;
 pub mod pipeline;

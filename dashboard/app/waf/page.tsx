@@ -27,7 +27,7 @@ export default function Waf() {
     <div className="space-y-5">
       <div className="flex items-end justify-between gap-4">
         <div>
-          <h1 className="text-[17px] font-semibold tracking-tight">WAF</h1>
+          <h1 className="text-[17px] tracking-tight">WAF</h1>
           <p className="text-[13px] text-muted">
             Try a request against the rules before you trust them.
           </p>
@@ -190,7 +190,7 @@ function Tester({ zone }: { zone: string }) {
 
       {error && (
         <div className="border-t hair px-4 py-3 text-[13px]">
-          <span className="text-danger">Could not run it.</span>{" "}
+          <span className="text-bad">Could not run it.</span>{" "}
           <span className="text-muted">{error}</span>
         </div>
       )}
@@ -202,7 +202,7 @@ function Tester({ zone }: { zone: string }) {
 
 function Verdict({ result }: { result: Explained }) {
   const tone = {
-    block: "text-danger border-danger/50",
+    block: "text-bad border-bad/50",
     skip: "text-accent border-accent/50",
     allow: "text-good border-good/50",
   }[result.outcome];
@@ -237,7 +237,7 @@ function Verdict({ result }: { result: Explained }) {
               <span
                 className={`text-[11.5px] w-12 text-right ${
                   m.action === "block"
-                    ? "text-danger"
+                    ? "text-bad"
                     : m.action === "skip"
                       ? "text-accent"
                       : "text-warn"

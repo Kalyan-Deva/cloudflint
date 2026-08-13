@@ -3,6 +3,8 @@
  * the live log stays live rather than arriving in one lump at the end.
  */
 const EDGE = process.env.CLOUDVEIL_EDGE ?? "http://127.0.0.1:9001";
+/* attached here, on the server, so the token never reaches the browser */
+const TOKEN = process.env.CLOUDVEIL_ADMIN_TOKEN ?? "";
 
 async function forward(req: Request, path: string[]) {
   const url = new URL(req.url);
@@ -12,7 +14,10 @@ async function forward(req: Request, path: string[]) {
   try {
     const upstream = await fetch(target, {
       method: req.method,
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        ...(TOKEN ? { authorization: `Bearer ${TOKEN}` } : {}),
+      },
       body: req.method === "GET" || req.method === "HEAD" ? undefined : await req.text(),
       cache: "no-store",
       // @ts-expect-error node fetch needs this to stream a response body
@@ -30,6 +35,7 @@ async function forward(req: Request, path: string[]) {
       });
     }
 
+    /* nothing but the body goes back - the token is ours, not the browser's */
     return new Response(await upstream.text(), {
       status: upstream.status,
       headers: { "content-type": "application/json" },

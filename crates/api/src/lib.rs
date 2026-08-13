@@ -31,20 +31,100 @@ pub struct Api {
     /// Edge admin urls to fan purges out to. Purges have to reach the data plane -
     /// the cache lives there, and this process can only ask.
     pub edges: Arc<Vec<String>>,
+    /// The token this process presents to those edges. Their admin API is guarded
+    /// too, so asking politely is not enough.
+    pub edge_token: Option<Arc<String>>,
 }
 
 pub fn router(api: Api) -> Router {
-    Router::new()
-        .route("/health", get(health))
+    /* health is the only thing outside the fence, so an orchestrator can probe it
+       without holding a credential. everything that reads or changes anything is
+       behind a token. */
+    let guarded = Router::new()
         .route("/v1/config", get(get_config).put(put_config))
         .route("/v1/config/revisions", get(list_revisions))
         .route("/v1/config/revisions/{id}/activate", post(activate))
         .route("/v1/events", post(ingest))
         .route("/v1/analytics/summary", get(summary))
+        .route("/v1/analytics/timeseries", get(timeseries))
         .route("/v1/zones", get(zones))
         .route("/v1/waf/test", post(waf_test))
         .route("/v1/purge", post(purge))
+        .route("/v1/tokens", get(list_tokens).post(mint_token))
+        .route("/v1/tokens/{id}", axum::routing::delete(revoke_token))
+        .route_layer(axum::middleware::from_fn_with_state(api.clone(), require_token));
+
+    Router::new()
+        .route("/health", get(health))
+        .merge(guarded)
         .with_state(api)
+}
+
+/// Every guarded route goes through here first.
+async fn require_token(
+    State(api): State<Api>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, Problem> {
+    let Some(token) = cloudveil_edge::auth::bearer(req.headers()) else {
+        return Err(Problem(
+            StatusCode::UNAUTHORIZED,
+            "a bearer token is required".into(),
+        ));
+    };
+
+    match api.db.token_holder(token, now_ms()) {
+        Ok(Some(name)) => {
+            tracing::debug!("request authorised as `{name}`");
+            Ok(next.run(req).await)
+        }
+        Ok(None) => Err(Problem(
+            StatusCode::UNAUTHORIZED,
+            "that token is not recognised".into(),
+        )),
+        Err(e) => Err(internal(e)),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct MintToken {
+    pub name: String,
+}
+
+/// Mint a token. The secret is in the response and never stored, so this is the only
+/// time anyone will see it.
+async fn mint_token(State(api): State<Api>, Json(body): Json<MintToken>) -> ApiResult {
+    if body.name.trim().is_empty() {
+        return Err(bad_request("a token needs a name, so it can be recognised later"));
+    }
+    let token = cloudveil_edge::auth::generate();
+    let id = api
+        .db
+        .add_token(body.name.trim(), &token, now_ms())
+        .map_err(internal)?;
+
+    info!("token `{}` minted", body.name.trim());
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "id": id,
+            "name": body.name.trim(),
+            "token": token,
+            "note": "this is the only time this token is shown - only its hash is stored"
+        })),
+    )
+        .into_response())
+}
+
+async fn list_tokens(State(api): State<Api>) -> ApiResult {
+    Ok(Json(api.db.tokens().map_err(internal)?).into_response())
+}
+
+async fn revoke_token(State(api): State<Api>, Path(id): Path<i64>) -> ApiResult {
+    match api.db.revoke_token(id).map_err(internal)? {
+        true => Ok(Json(json!({ "revoked": id })).into_response()),
+        false => Err(Problem(StatusCode::NOT_FOUND, format!("no token {id}"))),
+    }
 }
 
 fn now_ms() -> i64 {
@@ -155,6 +235,26 @@ async fn summary(State(api): State<Api>, Query(q): Query<SummaryQuery>) -> ApiRe
         .summary(q.zone.as_deref(), since)
         .map_err(internal)?;
     Ok(Json(summary).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct SeriesQuery {
+    #[serde(default)]
+    pub zone: Option<String>,
+    #[serde(default)]
+    pub since_mins: Option<i64>,
+    #[serde(default)]
+    pub buckets: Option<i64>,
+}
+
+async fn timeseries(State(api): State<Api>, Query(q): Query<SeriesQuery>) -> ApiResult {
+    let mins = q.since_mins.unwrap_or(60).clamp(1, 60 * 24 * 30);
+    let since = now_ms() - mins * 60_000;
+    let series = api
+        .db
+        .timeseries(q.zone.as_deref(), since, q.buckets.unwrap_or(60))
+        .map_err(internal)?;
+    Ok(Json(json!({ "since_mins": mins, "buckets": series })).into_response())
 }
 
 #[derive(Debug, Serialize)]
@@ -350,7 +450,7 @@ async fn purge(State(api): State<Api>, Json(ask): Json<PurgeRequest>) -> ApiResu
     let body = serde_json::to_vec(&ask).map_err(internal)?;
     let mut results = Vec::with_capacity(api.edges.len());
     for edge in api.edges.iter() {
-        results.push(ask_edge(edge, &body).await);
+        results.push(ask_edge(edge, &body, api.edge_token.as_deref()).await);
     }
 
     /* report per edge rather than collapsing to one status: "mostly purged" is a
@@ -364,7 +464,7 @@ async fn purge(State(api): State<Api>, Json(ask): Json<PurgeRequest>) -> ApiResu
     Ok((status, Json(json!({ "edges": results }))).into_response())
 }
 
-async fn ask_edge(base: &str, body: &[u8]) -> EdgeResult {
+async fn ask_edge(base: &str, body: &[u8], token: Option<&String>) -> EdgeResult {
     use http_body_util::{BodyExt, Full};
     use hyper::body::Bytes;
     use hyper_util::client::legacy::connect::HttpConnector;
@@ -375,11 +475,15 @@ async fn ask_edge(base: &str, body: &[u8]) -> EdgeResult {
         Client::builder(TokioExecutor::new()).build_http();
     let url = format!("{}/admin/purge", base.trim_end_matches('/'));
 
-    let req = hyper::Request::builder()
+    let mut req = hyper::Request::builder()
         .method(hyper::Method::POST)
         .uri(&url)
-        .header("content-type", "application/json")
-        .body(Full::new(Bytes::copy_from_slice(body)));
+        .header("content-type", "application/json");
+
+    if let Some(token) = token {
+        req = req.header("authorization", format!("Bearer {token}"));
+    }
+    let req = req.body(Full::new(Bytes::copy_from_slice(body)));
 
     let Ok(req) = req else {
         return EdgeResult {

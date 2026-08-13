@@ -6,6 +6,8 @@
  * on another port can read them.
  */
 const CP = process.env.CLOUDVEIL_CP ?? "http://127.0.0.1:9000";
+/* attached here, on the server, so the token never reaches the browser */
+const TOKEN = process.env.CLOUDVEIL_API_TOKEN ?? "";
 
 async function forward(req: Request, path: string[]) {
   const url = new URL(req.url);
@@ -14,7 +16,10 @@ async function forward(req: Request, path: string[]) {
   try {
     const upstream = await fetch(target, {
       method: req.method,
-      headers: { "content-type": req.headers.get("content-type") ?? "application/json" },
+      headers: {
+        "content-type": req.headers.get("content-type") ?? "application/json",
+        ...(TOKEN ? { authorization: `Bearer ${TOKEN}` } : {}),
+      },
       body: req.method === "GET" || req.method === "HEAD" ? undefined : await req.text(),
       cache: "no-store",
     });

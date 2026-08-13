@@ -5,6 +5,8 @@ const nextConfig: NextConfig = {
   env: {
     CLOUDVEIL_CP: process.env.CLOUDVEIL_CP ?? "http://127.0.0.1:9000",
     CLOUDVEIL_EDGE: process.env.CLOUDVEIL_EDGE ?? "http://127.0.0.1:9001",
+    CLOUDVEIL_API_TOKEN: process.env.CLOUDVEIL_API_TOKEN ?? "",
+    CLOUDVEIL_ADMIN_TOKEN: process.env.CLOUDVEIL_ADMIN_TOKEN ?? "",
   },
 };
 

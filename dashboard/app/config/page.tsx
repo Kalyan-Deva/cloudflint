@@ -57,7 +57,7 @@ export default function Config() {
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-[17px] font-semibold tracking-tight">Config</h1>
+        <h1 className="text-[17px] tracking-tight">Config</h1>
         <p className="text-[13px] text-muted">
           Checked with the edge&apos;s own parser on save, so a config that would break
           the data plane never gets stored.
@@ -67,7 +67,7 @@ export default function Config() {
       {said && (
         <div
           className={`border rounded px-4 py-2.5 text-[13px] ${
-            said.good ? "border-good/40 text-good" : "border-danger/40 text-danger"
+            said.good ? "border-good/40 text-good" : "border-bad/40 text-bad"
           }`}
         >
           {said.text}
@@ -201,7 +201,7 @@ function Purge() {
           />
         )}
 
-        <Button onClick={run} tone="danger" disabled={busy}>
+        <Button onClick={run} tone="bad" disabled={busy}>
           {busy ? "Purging…" : kind === "all" ? "Purge everything" : `Purge by ${kind}`}
         </Button>
 

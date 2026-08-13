@@ -9,10 +9,17 @@ use cloudveil_api::{router, Api};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+/// Every guarded route needs a token now, so the fixture mints one and every call
+/// carries it. `TOKEN` is what the tests present; the db stores only its hash.
+const TOKEN: &str = "cv_testtoken0123456789abcdef0123456789abcdef0123456789abcdef01";
+
 fn app(edges: Vec<String>) -> axum::Router {
+    let db = Db::open(":memory:").expect("in-memory db");
+    db.add_token("tests", TOKEN, 0).expect("token should store");
     router(Api {
-        db: Db::open(":memory:").expect("in-memory db"),
+        db,
         edges: Arc::new(edges),
+        edge_token: None,
     })
 }
 
@@ -22,7 +29,10 @@ async fn call(
     uri: &str,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
-    let req = Request::builder().method(method).uri(uri);
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("authorization", format!("Bearer {TOKEN}"));
     let req = match body {
         Some(value) => req
             .header("content-type", "application/json")
@@ -345,4 +355,150 @@ async fn the_rule_tester_can_try_rules_that_are_not_saved_yet() {
 
     assert_eq!(status, StatusCode::OK, "nothing was saved, and it still worked");
     assert_eq!(body["decided_by"], "draft-rule");
+}
+
+#[tokio::test]
+async fn everything_but_health_needs_a_token() {
+    let app = app(vec![]);
+
+    /* health is deliberately open, so an orchestrator can probe it */
+    let health = app
+        .clone()
+        .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
+
+    for (method, uri) in [
+        ("GET", "/v1/config"),
+        ("PUT", "/v1/config"),
+        ("GET", "/v1/config/revisions"),
+        ("POST", "/v1/events"),
+        ("GET", "/v1/analytics/summary"),
+        ("GET", "/v1/zones"),
+        ("POST", "/v1/waf/test"),
+        ("POST", "/v1/purge"),
+        ("GET", "/v1/tokens"),
+    ] {
+        let bare = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            bare.status(),
+            StatusCode::UNAUTHORIZED,
+            "{method} {uri} answered without a token"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_token_nobody_minted_is_refused() {
+    let app = app(vec![]);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/config")
+                .header("authorization", "Bearer cv_this_was_never_minted_anywhere")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_minted_token_works_and_can_be_revoked() {
+    let app = app(vec![]);
+
+    let (status, minted) =
+        call(&app, "POST", "/v1/tokens", Some(json!({ "name": "an edge" }))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let secret = minted["token"].as_str().expect("the secret, once").to_owned();
+    let id = minted["id"].as_i64().unwrap();
+
+    let with = |token: String| {
+        Request::builder()
+            .uri("/v1/config/revisions")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let used = app.clone().oneshot(with(secret.clone())).await.unwrap();
+    assert_eq!(used.status(), StatusCode::OK, "a fresh token should work");
+
+    /* listed, but the secret itself is never readable back */
+    let (_, listed) = call(&app, "GET", "/v1/tokens", None).await;
+    let text = listed.to_string();
+    assert!(text.contains("an edge"));
+    assert!(!text.contains(&secret), "the token must not be readable back");
+
+    let (status, _) = call(&app, "DELETE", &format!("/v1/tokens/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let after = app.oneshot(with(secret)).await.unwrap();
+    assert_eq!(
+        after.status(),
+        StatusCode::UNAUTHORIZED,
+        "revoking should take effect immediately"
+    );
+}
+
+#[tokio::test]
+async fn the_traffic_chart_gets_real_buckets() {
+    let app = app(vec![]);
+    call(
+        &app,
+        "POST",
+        "/v1/events",
+        Some(json!([
+            event("demo", 200, 1_000, Some("HIT"), "/a"),
+            event("demo", 200, 2_000, Some("MISS"), "/a"),
+            event("demo", 403, 500, None, "/admin"),
+            event("demo", 429, 200, None, "/api"),
+            event("demo", 502, 90_000, None, "/slow"),
+        ])),
+    )
+    .await;
+
+    let (status, body) = call(
+        &app,
+        "GET",
+        "/v1/analytics/timeseries?zone=demo&since_mins=60&buckets=10",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let buckets = body["buckets"].as_array().unwrap();
+    assert!(!buckets.is_empty(), "events just went in, so there should be a bucket");
+
+    let total: u64 = buckets.iter().map(|b| b["requests"].as_u64().unwrap()).sum();
+    let blocked: u64 = buckets.iter().map(|b| b["blocked"].as_u64().unwrap()).sum();
+    let limited: u64 = buckets.iter().map(|b| b["limited"].as_u64().unwrap()).sum();
+    let errors: u64 = buckets.iter().map(|b| b["errors"].as_u64().unwrap()).sum();
+    let hits: u64 = buckets.iter().map(|b| b["cache_hits"].as_u64().unwrap()).sum();
+
+    assert_eq!(total, 5);
+    assert_eq!(blocked, 1);
+    assert_eq!(limited, 1);
+    assert_eq!(errors, 1);
+    assert_eq!(hits, 1);
+}
+
+#[tokio::test]
+async fn an_empty_window_gives_an_empty_chart_rather_than_an_error() {
+    let app = app(vec![]);
+    let (status, body) = call(&app, "GET", "/v1/analytics/timeseries?since_mins=5", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["buckets"].as_array().unwrap().is_empty());
 }

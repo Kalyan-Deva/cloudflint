@@ -1,22 +1,27 @@
 @import "tailwindcss";
 
-/* Matte, warm, flat. Separation comes from hairlines, never shadows or glass. */
+/* A data terminal, not a landing page. Near-black, one vivid accent, monospace
+   throughout, and separation by hairline rather than by shadow or blur. */
 @theme {
-  --color-base: #14161a;
-  --color-surface: #1c1f24;
-  --color-raised: #22262c;
-  --color-line: #2a2e35;
-  --color-text: #e6e3dd;
-  --color-muted: #8b9099;
-  --color-accent: #c9784a;
-  --color-danger: #b8574d;
-  --color-good: #7d9471;
-  --color-warn: #b8974d;
+  --color-base: #0b0b0d;
+  --color-panel: #141417;
+  --color-raised: #1b1c20;
+  --color-line: #26272c;
+  --color-line-soft: #1e1f23;
 
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-    "Helvetica Neue", sans-serif;
-  --font-mono: ui-monospace, "Cascadia Mono", "Segoe UI Mono", "JetBrains Mono",
+  --color-text: #e9e7e4;
+  --color-muted: #8b8e95;
+  --color-dim: #62656c;
+
+  --color-accent: #f2691b;
+  --color-accent-dim: #a8481199;
+  --color-good: #47bd7b;
+  --color-bad: #e0574f;
+  --color-warn: #d9a441;
+
+  --font-sans: ui-monospace, "Cascadia Mono", "Segoe UI Mono", "JetBrains Mono",
     Menlo, Consolas, monospace;
+  --font-mono: var(--font-sans);
 }
 
 html,
@@ -24,8 +29,8 @@ body {
   background: var(--color-base);
   color: var(--color-text);
   font-family: var(--font-sans);
-  font-size: 14px;
-  line-height: 1.6;
+  font-size: 13px;
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -33,10 +38,17 @@ body {
   box-sizing: border-box;
 }
 
-/* An ops console reads like a table, not a landing page: tight, monospaced
-   numbers, and columns that line up between rows. */
+/* Numbers line up between rows or the whole thing reads as noise. */
 .tabular {
   font-variant-numeric: tabular-nums;
+}
+
+/* The small uppercase caption above every value in this design. */
+.cap {
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--color-dim);
 }
 
 .hair {
@@ -61,7 +73,7 @@ textarea,
 select {
   background: var(--color-base);
   border: 1px solid var(--color-line);
-  border-radius: 3px;
+  border-radius: 2px;
   padding: 0.375rem 0.5rem;
   width: 100%;
 }
@@ -74,28 +86,41 @@ select:focus {
 }
 
 textarea {
-  font-family: var(--font-mono);
-  font-size: 12.5px;
-  line-height: 1.65;
+  font-size: 12px;
+  line-height: 1.7;
   resize: vertical;
 }
 
 ::selection {
-  background: color-mix(in srgb, var(--color-accent) 35%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 40%, transparent);
 }
 
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 9px;
+  height: 9px;
 }
 ::-webkit-scrollbar-track {
-  background: var(--color-base);
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2f343c;
+  background: #2c2e34;
   border: 2px solid var(--color-base);
-  border-radius: 6px;
+  border-radius: 5px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #3a4048;
+  background: #3a3d45;
+}
+
+/* The live dot in the top strip and the sidebar footer. */
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.pulse {
+  animation: pulse 2s ease-in-out infinite;
 }

@@ -4,8 +4,11 @@
 //! control plane can only ask. Deliberately hand-rolled rather than pulling a web
 //! framework into the data plane for four endpoints.
 //!
-//! Bind it to loopback, or to an interface only your control plane can reach. There
-//! is no authentication: anything that can talk to this port can empty your cache.
+//! Every endpoint except `/admin/health` needs a bearer token, taken from the
+//! environment rather than the config file - the config travels to other nodes and is
+//! editable in the dashboard, which is no place for a secret. Bind it to loopback or
+//! an interface only your control plane can reach as well; the token is the control,
+//! the network boundary is the belt.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -20,6 +23,7 @@ use serde_json::json;
 use tokio::net::TcpListener;
 use tracing::{debug, info};
 
+use crate::auth::Guard;
 use crate::body::{adapt, full, Body};
 use crate::cache::Store;
 use crate::snapshot::Snapshot;
@@ -40,8 +44,14 @@ pub struct PurgeRequest {
     pub all: bool,
 }
 
+/// Where the admin token comes from. Not the config file - see `auth`.
+pub const TOKEN_VAR: &str = "CLOUDVEIL_ADMIN_TOKEN";
+
 pub async fn serve(listener: TcpListener, edge: Arc<Edge>) -> anyhow::Result<()> {
     let started = Instant::now();
+    /* fails rather than starting open: anything that can reach this port can empty
+       your cache, and "keep it internal" is a document, not a control */
+    let guard = Arc::new(Guard::from_env(TOKEN_VAR)?);
 
     loop {
         let (stream, peer) = match listener.accept().await {
@@ -52,11 +62,15 @@ pub async fn serve(listener: TcpListener, edge: Arc<Edge>) -> anyhow::Result<()>
             }
         };
         let edge = edge.clone();
+        let guard = guard.clone();
         tokio::spawn(async move {
             let io = TokioIo::new(stream);
             let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
                 let edge = edge.clone();
-                async move { Ok::<_, std::convert::Infallible>(route(req, edge, started).await) }
+                let guard = guard.clone();
+                async move {
+                    Ok::<_, std::convert::Infallible>(route(req, edge, guard, started).await)
+                }
             });
             if let Err(e) = http1::Builder::new().serve_connection(io, svc).await {
                 debug!("{peer}: admin connection closed: {e}");
@@ -68,9 +82,16 @@ pub async fn serve(listener: TcpListener, edge: Arc<Edge>) -> anyhow::Result<()>
 async fn route(
     req: Request<hyper::body::Incoming>,
     edge: Arc<Edge>,
+    guard: Arc<Guard>,
     started: Instant,
 ) -> Response<Body> {
     let path = req.uri().path().to_owned();
+
+    /* health stays open so an orchestrator can probe it without holding a secret;
+       it says nothing a port scan wouldn't already tell you */
+    if path != "/admin/health" && !guard.allows(req.headers()) {
+        return problem(StatusCode::UNAUTHORIZED, "a bearer token is required");
+    }
 
     match (req.method(), path.as_str()) {
         (&Method::GET, "/admin/health") => ok(json!({

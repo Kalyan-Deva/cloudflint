@@ -11,12 +11,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use http_body_util::{BodyExt, Full};
-use hyper::body::Bytes;
-use hyper::{Method, Request};
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::client::legacy::Client;
-use hyper_util::rt::TokioExecutor;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, warn};
@@ -83,7 +77,12 @@ impl Sink {
         });
 
         if let (Some(url), Some(rx)) = (control_plane, rx) {
-            tokio::spawn(ship(url, rx));
+            match crate::cp::ControlPlane::from_env(url) {
+                Ok(cp) => {
+                    tokio::spawn(ship(cp, rx));
+                }
+                Err(e) => warn!("analytics disabled, cannot reach the control plane: {e:#}"),
+            }
         }
         sink
     }
@@ -128,10 +127,7 @@ impl Sink {
     }
 }
 
-async fn ship(url: String, mut rx: mpsc::Receiver<Event>) {
-    let client: Client<HttpConnector, Full<Bytes>> =
-        Client::builder(TokioExecutor::new()).build_http();
-    let endpoint = format!("{}/v1/events", url.trim_end_matches('/'));
+async fn ship(cp: crate::cp::ControlPlane, mut rx: mpsc::Receiver<Event>) {
     let mut batch: Vec<Event> = Vec::with_capacity(BATCH);
     let mut ticker = tokio::time::interval(FLUSH_EVERY);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -142,22 +138,18 @@ async fn ship(url: String, mut rx: mpsc::Receiver<Event>) {
                 Some(event) => {
                     batch.push(event);
                     if batch.len() >= BATCH {
-                        post(&client, &endpoint, &mut batch).await;
+                        post(&cp, &mut batch).await;
                     }
                 }
                 None => break,
             },
-            _ = ticker.tick() => post(&client, &endpoint, &mut batch).await,
+            _ = ticker.tick() => post(&cp, &mut batch).await,
         }
     }
-    post(&client, &endpoint, &mut batch).await;
+    post(&cp, &mut batch).await;
 }
 
-async fn post(
-    client: &Client<HttpConnector, Full<Bytes>>,
-    endpoint: &str,
-    batch: &mut Vec<Event>,
-) {
+async fn post(cp: &crate::cp::ControlPlane, batch: &mut Vec<Event>) {
     if batch.is_empty() {
         return;
     }
@@ -174,24 +166,9 @@ async fn post(
        old events would cost more than the events are worth */
     batch.clear();
 
-    let req = Request::builder()
-        .method(Method::POST)
-        .uri(endpoint)
-        .header("content-type", "application/json")
-        .body(Full::new(Bytes::from(body)));
-
-    let Ok(req) = req else {
-        warn!("analytics: bad endpoint {endpoint}");
-        return;
-    };
-
-    match client.request(req).await {
-        Ok(resp) if resp.status().is_success() => {
-            let _ = resp.into_body().collect().await;
-            debug!("analytics: shipped {count} events");
-        }
-        Ok(resp) => warn!("analytics: control plane answered {}", resp.status()),
-        Err(e) => warn!("analytics: could not reach the control plane: {e}"),
+    match cp.post("/v1/events", body).await {
+        Ok(_) => debug!("analytics: shipped {count} events"),
+        Err(e) => warn!("analytics: {e:#}"),
     }
 }
 

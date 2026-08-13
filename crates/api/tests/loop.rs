@@ -53,11 +53,22 @@ async fn spawn_origin(hits: Arc<AtomicUsize>) -> SocketAddr {
     addr
 }
 
+/// The whole loop is authenticated now, so the fixture sets both tokens up front.
+const CP_TOKEN: &str = "cv_looptoken0123456789abcdef0123456789abcdef0123456789abcdef01";
+const ADMIN_TOKEN: &str = "cv_admintoken789abcdef0123456789abcdef0123456789abcdef012345";
+
+fn set_tokens() {
+    std::env::set_var(cloudveil_edge::cp::TOKEN_VAR, CP_TOKEN);
+    std::env::set_var(cloudveil_edge::admin::TOKEN_VAR, ADMIN_TOKEN);
+}
+
 async fn spawn_control_plane(edges: Vec<String>) -> (SocketAddr, Db) {
     let db = Db::open(":memory:").expect("in-memory db");
+    db.add_token("tests", CP_TOKEN, 0).expect("token should store");
     let api = Api {
         db: db.clone(),
         edges: Arc::new(edges),
+        edge_token: Some(Arc::new(ADMIN_TOKEN.to_string())),
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -89,12 +100,37 @@ async fn get(addr: SocketAddr, host: &str, path: &str) -> (StatusCode, String, O
 }
 
 /// Talk to the control plane over a real socket, same as the edge does.
-async fn api_call(addr: SocketAddr, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+async fn admin_call(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    call_with(addr, method, path, body, ADMIN_TOKEN).await
+}
+
+async fn api_call(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    call_with(addr, method, path, body, CP_TOKEN).await
+}
+
+async fn call_with(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    token: &str,
+) -> (StatusCode, Value) {
     let payload = body.map(|v| serde_json::to_vec(&v).unwrap()).unwrap_or_default();
     let req = Request::builder()
         .method(method)
         .uri(format!("http://{addr}{path}"))
         .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
         .body(Full::new(Bytes::from(payload)))
         .unwrap();
 
@@ -116,6 +152,7 @@ async fn until(mut check: impl FnMut() -> bool) -> bool {
 
 #[tokio::test]
 async fn the_edge_pulls_its_config_and_reports_back() {
+    set_tokens();
     let hits = Arc::new(AtomicUsize::new(0));
     let origin = spawn_origin(hits.clone()).await;
 
@@ -221,6 +258,7 @@ async fn the_edge_pulls_its_config_and_reports_back() {
 
 #[tokio::test]
 async fn a_control_plane_that_goes_away_does_not_take_traffic_with_it() {
+    set_tokens();
     let hits = Arc::new(AtomicUsize::new(0));
     let origin = spawn_origin(hits.clone()).await;
 
@@ -251,6 +289,7 @@ async fn a_control_plane_that_goes_away_does_not_take_traffic_with_it() {
 
 #[tokio::test]
 async fn the_admin_api_reports_what_the_edge_is_holding() {
+    set_tokens();
     let hits = Arc::new(AtomicUsize::new(0));
     let origin = spawn_origin(hits.clone()).await;
 
@@ -278,20 +317,20 @@ async fn the_admin_api_reports_what_the_edge_is_holding() {
     get(proxy, "demo.local", "/two").await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let (status, stats) = api_call(admin_addr, "GET", "/admin/stats", None).await;
+    let (status, stats) = admin_call(admin_addr, "GET", "/admin/stats", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(stats["zones"], 1);
     assert_eq!(stats["cache"]["entries"], 2);
     assert_eq!(stats["events"]["seen"], 2);
 
-    let (_, recent) = api_call(admin_addr, "GET", "/admin/recent?limit=1", None).await;
+    let (_, recent) = admin_call(admin_addr, "GET", "/admin/recent?limit=1", None).await;
     let recent = recent.as_array().unwrap();
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0]["path"], "/two", "newest first");
     assert_eq!(recent[0]["zone"], "demo");
 
     /* purge by zone, straight at the edge */
-    let (status, body) = api_call(
+    let (status, body) = admin_call(
         admin_addr,
         "POST",
         "/admin/purge",
@@ -301,13 +340,14 @@ async fn the_admin_api_reports_what_the_edge_is_holding() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["removed"], 2);
 
-    let (_, stats) = api_call(admin_addr, "GET", "/admin/stats", None).await;
+    let (_, stats) = admin_call(admin_addr, "GET", "/admin/stats", None).await;
     assert_eq!(stats["cache"]["entries"], 0);
     assert_eq!(stats["cache"]["bytes"], 0);
 }
 
 #[tokio::test]
 async fn a_purge_naming_nothing_useful_is_refused() {
+    set_tokens();
     let yaml = "zones:\n  - name: demo\n    hostnames: [\"demo.local\"]\n    origin:\n      url: \"http://127.0.0.1:9\"\n";
     let snap = Arc::new(Snapshot::new(config::parse(yaml).unwrap()));
     let edge = Edge::new(snap);
@@ -318,11 +358,11 @@ async fn a_purge_naming_nothing_useful_is_refused() {
         let _ = admin::serve(admin_listener, edge).await;
     });
 
-    let (status, body) = api_call(admin_addr, "POST", "/admin/purge", Some(json!({}))).await;
+    let (status, body) = admin_call(admin_addr, "POST", "/admin/purge", Some(json!({}))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("exactly one"));
 
-    let (status, body) = api_call(
+    let (status, body) = admin_call(
         admin_addr,
         "POST",
         "/admin/purge",
@@ -342,6 +382,7 @@ async fn the_router_answers_health_in_process() {
     let app = router(Api {
         db,
         edges: Arc::new(vec![]),
+        edge_token: None,
     });
     let resp = app
         .oneshot(

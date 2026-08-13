@@ -39,6 +39,14 @@ CREATE TABLE IF NOT EXISTS events (
     client_ip   TEXT    NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS tokens (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT    NOT NULL,
+    hash         TEXT    NOT NULL UNIQUE,
+    created_at   INTEGER NOT NULL,
+    last_used_at INTEGER
+);
+
 CREATE INDEX IF NOT EXISTS events_at ON events(at_ms);
 CREATE INDEX IF NOT EXISTS events_zone_at ON events(zone, at_ms);
 "#;
@@ -72,6 +80,26 @@ pub struct Summary {
     pub by_stage: Vec<(String, u64)>,
     pub top_paths: Vec<(String, u64)>,
     pub top_ips: Vec<(String, u64)>,
+}
+
+/// One bucket of the traffic chart.
+#[derive(Debug, Clone, Serialize)]
+pub struct Bucket {
+    pub at_ms: i64,
+    pub requests: u64,
+    pub blocked: u64,
+    pub limited: u64,
+    pub errors: u64,
+    pub cache_hits: u64,
+    pub p95_us: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenInfo {
+    pub id: i64,
+    pub name: String,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -176,6 +204,117 @@ impl Db {
             params![id],
         )?;
         Ok(())
+    }
+
+    /// Only the hash is stored. The token itself is shown once, when it is minted.
+    pub fn add_token(&self, name: &str, token: &str, now: i64) -> Result<i64> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO tokens (name, hash, created_at) VALUES (?1, ?2, ?3)",
+            params![name, cloudveil_edge::auth::hash(token), now],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// The name behind a presented token, or None.
+    ///
+    /// The lookup is by hash, so there is no secret to compare in variable time - an
+    /// attacker who could measure this would learn which hash they had already found.
+    pub fn token_holder(&self, presented: &str, now: i64) -> Result<Option<String>> {
+        let conn = self.lock();
+        let hash = cloudveil_edge::auth::hash(presented);
+
+        let found: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT id, name FROM tokens WHERE hash = ?1",
+                params![hash],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
+
+        match found {
+            Some((id, name)) => {
+                let _ = conn.execute(
+                    "UPDATE tokens SET last_used_at = ?1 WHERE id = ?2",
+                    params![now, id],
+                );
+                Ok(Some(name))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn tokens(&self) -> Result<Vec<TokenInfo>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, created_at, last_used_at FROM tokens ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(TokenInfo {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                created_at: row.get(2)?,
+                last_used_at: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn token_count(&self) -> Result<i64> {
+        let conn = self.lock();
+        Ok(conn.query_row("SELECT COUNT(*) FROM tokens", [], |row| row.get(0))?)
+    }
+
+    pub fn revoke_token(&self, id: i64) -> Result<bool> {
+        let conn = self.lock();
+        Ok(conn.execute("DELETE FROM tokens WHERE id = ?1", params![id])? > 0)
+    }
+
+    /// Counts per time bucket, for the traffic chart. Bucket width is derived from
+    /// the window so the chart always has roughly the same number of bars.
+    pub fn timeseries(
+        &self,
+        zone: Option<&str>,
+        since_ms: i64,
+        buckets: i64,
+    ) -> Result<Vec<Bucket>> {
+        let conn = self.lock();
+        let all_zones = zone.is_none();
+        let zone = zone.unwrap_or("");
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let width = ((now - since_ms) / buckets.clamp(4, 500)).max(1000);
+
+        let mut stmt = conn.prepare(
+            "SELECT (at_ms / ?4) * ?4 AS t,
+                    COUNT(*),
+                    COALESCE(SUM(status = 403), 0),
+                    COALESCE(SUM(status = 429), 0),
+                    COALESCE(SUM(status >= 500), 0),
+                    COALESCE(SUM(cache = 'HIT' OR cache = 'STALE' OR cache = 'STALE-ERROR'), 0),
+                    COALESCE(MAX(duration_us), 0)
+             FROM events
+             WHERE at_ms >= ?1 AND (?2 OR zone = ?3)
+             GROUP BY t ORDER BY t",
+        )?;
+
+        let rows = stmt.query_map(params![since_ms, all_zones, zone, width], |row| {
+            Ok(Bucket {
+                at_ms: row.get(0)?,
+                requests: row.get::<_, i64>(1)? as u64,
+                blocked: row.get::<_, i64>(2)? as u64,
+                limited: row.get::<_, i64>(3)? as u64,
+                errors: row.get::<_, i64>(4)? as u64,
+                cache_hits: row.get::<_, i64>(5)? as u64,
+                /* the slowest request in the bucket - honest, and cheaper than a
+                   percentile per bucket */
+                p95_us: row.get::<_, i64>(6)? as u64,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn insert_events(&self, events: &[Event]) -> Result<usize> {

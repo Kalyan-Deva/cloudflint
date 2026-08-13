@@ -68,7 +68,7 @@ export default function Logs() {
     <div className="space-y-5">
       <div className="flex items-end justify-between gap-4">
         <div>
-          <h1 className="text-[17px] font-semibold tracking-tight">Logs</h1>
+          <h1 className="text-[17px] tracking-tight">Logs</h1>
           <p className="text-[13px] text-muted">
             Streamed from the edge as requests happen, not from the control plane.
           </p>
@@ -77,7 +77,7 @@ export default function Logs() {
           <span className="flex items-center gap-1.5 text-[12px] text-muted">
             <i
               className={`w-1.5 h-1.5 rounded-full ${
-                state === "live" ? "bg-good" : state === "lost" ? "bg-danger" : "bg-warn"
+                state === "live" ? "bg-good" : state === "lost" ? "bg-bad" : "bg-warn"
               }`}
             />
             {state === "live" ? "connected" : state === "lost" ? "disconnected" : "connecting"}
@@ -113,7 +113,7 @@ export default function Logs() {
       >
         <div className="max-h-[62vh] overflow-auto">
           <table className="w-full text-[12.5px] font-mono">
-            <thead className="sticky top-0 bg-surface">
+            <thead className="sticky top-0 bg-panel">
               <tr className="text-muted text-left border-b hair">
                 <Th className="w-20">time</Th>
                 <Th className="w-14">status</Th>

@@ -28,6 +28,9 @@ rustls.workspace = true
 tokio-rustls.workspace = true
 rustls-pemfile.workspace = true
 rcgen.workspace = true
+hyper-rustls.workspace = true
+webpki-roots.workspace = true
+ring.workspace = true
 hyper.workspace = true
 hyper-util = { workspace = true, features = ["server-auto"] }
 http-body-util.workspace = true

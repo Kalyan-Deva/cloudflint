@@ -24,7 +24,7 @@ export default function Zones() {
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-[17px] font-semibold tracking-tight">Zones</h1>
+        <h1 className="text-[17px] tracking-tight">Zones</h1>
         <p className="text-[13px] text-muted">
           Read back from the active config by the edge&apos;s own parser
           {data ? ` — revision ${data.revision}` : ""}.
