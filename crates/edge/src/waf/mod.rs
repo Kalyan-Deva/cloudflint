@@ -73,7 +73,12 @@ impl<'a> Decoded<'a> {
             ip: self.ip,
             tls: self.tls,
             country: self.geo.country.as_deref(),
+            continent: self.geo.continent.as_deref(),
             asn: self.geo.asn,
+            as_org: self.geo.as_org.as_deref(),
+            hosting: self.geo.hosting,
+            vpn: self.geo.vpn,
+            tor: self.geo.tor,
         }
     }
 }
@@ -455,7 +460,12 @@ mod tests {
             ip,
             tls: false,
             country: None,
+            continent: None,
             asn: None,
+            as_org: None,
+            hosting: false,
+            vpn: false,
+            tor: false,
         })
     }
 
@@ -528,7 +538,12 @@ mod tests {
                 ip: "203.0.113.9".parse().unwrap(),
                 tls: false,
                 country: None,
+                continent: None,
                 asn: None,
+                as_org: None,
+                hosting: false,
+                vpn: false,
+                tor: false,
             };
             let mut log = Vec::new();
             assert!(
@@ -565,7 +580,12 @@ rules:
             ip: "203.0.113.9".parse().unwrap(),
             tls: false,
             country: None,
+            continent: None,
             asn: None,
+            as_org: None,
+            hosting: false,
+            vpn: false,
+            tor: false,
         };
         let mut log = Vec::new();
         let out = match rules.evaluate(&input, Phase::Head, &mut log) {
@@ -630,7 +650,12 @@ rules:
             ip: "203.0.113.9".parse().unwrap(),
             tls: false,
             country: None,
+            continent: None,
             asn: None,
+            as_org: None,
+            hosting: false,
+            vpn: false,
+            tor: false,
         };
 
         let mut log = Vec::new();

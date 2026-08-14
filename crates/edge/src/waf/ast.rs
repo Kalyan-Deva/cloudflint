@@ -14,6 +14,16 @@ pub enum Field {
     Ssl,
     /// ISO 3166-1 alpha-2, from the country database.
     GeoCountry,
+    /// Two-letter continent code.
+    GeoContinent,
+    /// The AS organisation name, for rules about a provider rather than a number.
+    GeoAsOrg,
+    /// Bare booleans, like `ssl`: a datacenter network, a VPN or proxy, a Tor exit, and
+    /// "deliberately hiding" which is the last two together.
+    IpHosting,
+    IpVpn,
+    IpTor,
+    IpAnonymous,
     /// Autonomous system number. Compared as its decimal text, so `eq "64512"` and
     /// `in {"64512" "64513"}` work with the same machinery every other field uses.
     GeoAsn,
@@ -26,7 +36,25 @@ impl Field {
 
     /// Whether evaluating this needs a geo database loaded.
     pub fn is_geoip(&self) -> bool {
-        matches!(self, Field::GeoCountry | Field::GeoAsn)
+        matches!(
+            self,
+            Field::GeoCountry
+                | Field::GeoAsn
+                | Field::GeoContinent
+                | Field::GeoAsOrg
+                | Field::IpHosting
+                | Field::IpVpn
+                | Field::IpTor
+                | Field::IpAnonymous
+        )
+    }
+
+    /// Fields that stand alone with no operator, the way `ssl` does.
+    pub fn is_bare_bool(&self) -> bool {
+        matches!(
+            self,
+            Field::Ssl | Field::IpHosting | Field::IpVpn | Field::IpTor | Field::IpAnonymous
+        )
     }
 }
 

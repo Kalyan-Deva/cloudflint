@@ -582,6 +582,18 @@ pub struct WafTest {
     /// Likewise for `ip.geoip.asnum`.
     #[serde(default)]
     pub asn: Option<u32>,
+    #[serde(default)]
+    pub continent: Option<String>,
+    #[serde(default)]
+    pub as_org: Option<String>,
+    /// The derived signals, given rather than worked out: the tester is asking "what would
+    /// this rule do to a request like this", and the edge is where the lists live.
+    #[serde(default)]
+    pub hosting: bool,
+    #[serde(default)]
+    pub vpn: bool,
+    #[serde(default)]
+    pub tor: bool,
 }
 
 fn get_method() -> String {
@@ -632,6 +644,7 @@ async fn waf_test(State(api): State<Api>, Json(t): Json<WafTest>) -> ApiResult {
         .map_err(|_| bad_request(format!("`{}` is not an ip address", t.ip)))?;
 
     let country = t.country.as_ref().map(|c| c.trim().to_ascii_uppercase());
+    let continent = t.continent.as_ref().map(|c| c.trim().to_ascii_uppercase());
 
     /* decoded exactly as the edge decodes it, or the tester would lie */
     let path = decode(&t.path, false);
@@ -657,7 +670,12 @@ async fn waf_test(State(api): State<Api>, Json(t): Json<WafTest>) -> ApiResult {
             /* upper-cased so a tester typing "gb" gets the same answer the edge would
                give, which reports what the database says - an ISO code, upper case */
             country: country.as_deref(),
+            continent: continent.as_deref(),
             asn: t.asn,
+            as_org: t.as_org.as_deref(),
+            hosting: t.hosting,
+            vpn: t.vpn,
+            tor: t.tor,
         },
         !t.body.is_empty(),
     );

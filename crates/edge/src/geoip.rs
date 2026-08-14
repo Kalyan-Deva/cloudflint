@@ -30,13 +30,28 @@ const METADATA_MAX: usize = 128 * 1024;
 pub struct Located {
     /// ISO 3166-1 alpha-2, upper case, e.g. `GB`.
     pub country: Option<String>,
+    /// Two letters: AF AN AS EU NA OC SA.
+    pub continent: Option<String>,
     pub asn: Option<u32>,
     pub as_org: Option<String>,
+    /// A datacenter or cloud network rather than somebody's home connection. Not an
+    /// accusation by itself - plenty of legitimate traffic comes from clouds - but it is
+    /// the most useful single signal about a client claiming to be a browser.
+    pub hosting: bool,
+    /// A commercial VPN or open proxy network.
+    pub vpn: bool,
+    /// A known Tor exit, from a list the operator supplies.
+    pub tor: bool,
 }
 
 impl Located {
     pub fn is_empty(&self) -> bool {
         self.country.is_none() && self.asn.is_none()
+    }
+
+    /// Deliberately hiding where they are, as opposed to merely being in a datacenter.
+    pub fn anonymous(&self) -> bool {
+        self.vpn || self.tor
     }
 }
 
@@ -214,6 +229,11 @@ impl Database {
                 .or_else(|| r.key(at, "country_code"))
                 .and_then(|c| r.str_at(c))
                 .map(|s| s.to_ascii_uppercase()),
+            continent: r
+                .key(at, "continent")
+                .and_then(|c| r.key(c, "code"))
+                .and_then(|c| r.str_at(c))
+                .map(|s| s.to_ascii_uppercase()),
             asn: r
                 .key(at, "autonomous_system_number")
                 .and_then(|a| r.u64_at(a))
@@ -222,6 +242,10 @@ impl Database {
                 .key(at, "autonomous_system_organization")
                 .and_then(|a| r.str_at(a))
                 .map(str::to_owned),
+            /* filled in by `Geo`, which is the only thing holding the lists */
+            hosting: false,
+            vpn: false,
+            tor: false,
         }
     }
 
@@ -244,18 +268,96 @@ impl Database {
 pub struct Geo {
     country: Option<Database>,
     asn: Option<Database>,
+    signals: Signals,
+}
+
+/// Turning facts into signals.
+///
+/// The facts come from a database. Whether an AS *is* "a hosting provider" is a judgement,
+/// and one that goes stale, so it is a keyword match over the AS organisation name with the
+/// defaults overridable in config - a wrong guess should be fixable without a release.
+///
+/// Tor is not a judgement at all, it is a published list. The Tor Project publishes its
+/// exit nodes, so the operator points at that file and the answer is exact.
+#[derive(Debug, Default)]
+pub struct Signals {
+    hosting: Vec<String>,
+    vpn: Vec<String>,
+    tor_exits: std::collections::HashSet<IpAddr>,
+}
+
+/// Names that nearly always mean a datacenter. Matched case-insensitively against the AS
+/// organisation, so "AMAZON-02" and "Amazon Data Services" both land.
+const HOSTING_WORDS: &[&str] = &[
+    "amazon", "aws", "google", "microsoft", "azure", "digitalocean", "linode", "vultr",
+    "hetzner", "ovh", "scaleway", "oracle cloud", "alibaba", "tencent", "cloudflare",
+    "fastly", "akamai", "leaseweb", "contabo", "choopa", "hostinger", "rackspace",
+    "equinix", "colocation", "datacenter", "data center", "hosting", "cloud",
+];
+
+/// Names that suggest a consumer VPN or open proxy rather than a cloud tenant.
+const VPN_WORDS: &[&str] = &[
+    "vpn", "nordvpn", "expressvpn", "surfshark", "mullvad", "private internet access",
+    "cyberghost", "ipvanish", "windscribe", "purevpn", "torguard", "proxy", "anonymizer",
+];
+
+impl Signals {
+    fn load(cfg: &crate::config::GeoipConfig) -> Result<Signals> {
+        /* given a list, use it *instead of* the defaults rather than as well: an operator
+           overriding this wants their answer, not ours plus theirs */
+        let words = |extra: &[String], defaults: &[&str]| -> Vec<String> {
+            match extra.is_empty() {
+                true => defaults.iter().map(|w| w.to_string()).collect(),
+                false => extra.iter().map(|w| w.to_lowercase()).collect(),
+            }
+        };
+
+        let mut tor_exits = std::collections::HashSet::new();
+        if let Some(path) = &cfg.tor_exits {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("reading the tor exit list {}", path.display()))?;
+            for line in text.lines() {
+                /* the published list carries comments and blank lines */
+                let line = line.split('#').next().unwrap_or("").trim();
+                if let Ok(ip) = line.parse() {
+                    tor_exits.insert(ip);
+                }
+            }
+            info!(
+                "geoip: {} tor exit nodes from {}",
+                tor_exits.len(),
+                path.display()
+            );
+        }
+
+        Ok(Signals {
+            hosting: words(&cfg.hosting_keywords, HOSTING_WORDS),
+            vpn: words(&cfg.vpn_keywords, VPN_WORDS),
+            tor_exits,
+        })
+    }
+
+    fn apply(&self, ip: IpAddr, found: &mut Located) {
+        if let Some(org) = &found.as_org {
+            let org = org.to_lowercase();
+            found.hosting = self.hosting.iter().any(|w| org.contains(w.as_str()));
+            found.vpn = self.vpn.iter().any(|w| org.contains(w.as_str()));
+        }
+        found.tor = self.tor_exits.contains(&ip);
+    }
 }
 
 impl Geo {
     /// None when no database is configured at all, so the request path can skip the
     /// lookup entirely rather than asking two empty questions per request.
     pub fn load(cfg: &crate::config::GeoipConfig) -> Result<Option<Geo>> {
-        if cfg.country.is_none() && cfg.asn.is_none() {
+        if !cfg.is_configured() {
             return Ok(None);
         }
         Ok(Some(Geo {
             country: cfg.country.as_deref().map(Database::open).transpose()?,
             asn: cfg.asn.as_deref().map(Database::open).transpose()?,
+            signals: Signals::load(cfg)?,
         }))
     }
 
@@ -265,6 +367,7 @@ impl Geo {
         if let Some(db) = &self.country {
             let c = db.lookup(ip);
             found.country = c.country;
+            found.continent = c.continent;
             /* a combined database may carry both, so don't throw the asn away */
             found.asn = c.asn;
             found.as_org = c.as_org;
@@ -274,7 +377,9 @@ impl Geo {
             found.asn = a.asn.or(found.asn);
             found.as_org = a.as_org.or(found.as_org);
             found.country = found.country.or(a.country);
+            found.continent = found.continent.or(a.continent);
         }
+        self.signals.apply(ip, &mut found);
         found
     }
 

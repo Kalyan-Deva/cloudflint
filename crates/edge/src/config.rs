@@ -73,11 +73,17 @@ impl Scope {
 pub struct GeoipConfig {
     pub country: Option<PathBuf>,
     pub asn: Option<PathBuf>,
+    /// A file of Tor exit addresses, one per line, as the Tor Project publishes them.
+    /// Not a guess like the keyword lists - an exact list somebody else maintains.
+    pub tor_exits: Option<PathBuf>,
+    /// Override the built-in hosting/VPN keyword lists. Empty means use the defaults.
+    pub hosting_keywords: Vec<String>,
+    pub vpn_keywords: Vec<String>,
 }
 
 impl GeoipConfig {
     pub fn is_configured(&self) -> bool {
-        self.country.is_some() || self.asn.is_some()
+        self.country.is_some() || self.asn.is_some() || self.tor_exits.is_some()
     }
 }
 
@@ -420,6 +426,9 @@ fn geoip_from(raw: Option<raw::Geoip>, zones: &[Zone]) -> Result<GeoipConfig> {
         Some(raw) => GeoipConfig {
             country: raw.country.map(PathBuf::from),
             asn: raw.asn.map(PathBuf::from),
+            tor_exits: raw.tor_exits.map(PathBuf::from),
+            hosting_keywords: raw.hosting_keywords,
+            vpn_keywords: raw.vpn_keywords,
         },
         None => GeoipConfig::default(),
     };
@@ -861,6 +870,13 @@ mod raw {
         /// An ASN database, e.g. GeoLite2-ASN.mmdb.
         #[serde(default)]
         pub asn: Option<String>,
+        /// The Tor Project's exit list, one address per line.
+        #[serde(default)]
+        pub tor_exits: Option<String>,
+        #[serde(default)]
+        pub hosting_keywords: Vec<String>,
+        #[serde(default)]
+        pub vpn_keywords: Vec<String>,
     }
 
     #[derive(Deserialize)]

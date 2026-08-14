@@ -223,10 +223,18 @@ impl Parser {
         let (name, at) = (name.clone(), *at);
         self.i += 1;
 
-        /* `ssl` is already a yes or no, so it stands alone: `ssl`, or `not ssl` */
-        if name == "ssl" {
+        /* these are already a yes or no, so they stand alone: `ssl`, or `not ip.src.is_tor` */
+        let bare = match name.as_str() {
+            "ssl" => Some(Field::Ssl),
+            "ip.src.is_hosting" => Some(Field::IpHosting),
+            "ip.src.is_vpn" => Some(Field::IpVpn),
+            "ip.src.is_tor" => Some(Field::IpTor),
+            "ip.src.is_anonymous" => Some(Field::IpAnonymous),
+            _ => None,
+        };
+        if let Some(field) = bare {
             return Ok(Expr::Cmp {
-                field: Field::Ssl,
+                field,
                 op: Op::Eq,
                 operand: Operand::Str("true".into()),
             });
@@ -316,6 +324,8 @@ fn field_from(name: &str, key: Option<&str>, at: usize) -> Result<Field> {
         ("ssl", None) => Field::Ssl,
         ("ip.geoip.country", None) => Field::GeoCountry,
         ("ip.geoip.asnum", None) => Field::GeoAsn,
+        ("ip.geoip.continent", None) => Field::GeoContinent,
+        ("ip.geoip.asorg", None) => Field::GeoAsOrg,
         (_, Some(_)) => bail!("`{name}` does not take a [\"...\"] key (column {col})"),
         _ => {
             return Err(anyhow!(
@@ -323,7 +333,9 @@ fn field_from(name: &str, key: Option<&str>, at: usize) -> Result<Field> {
                  have: http.request.method, http.request.uri, http.request.uri.path,\n\
                  \x20     http.request.uri.query, http.request.body, http.host,\n\
                  \x20     http.request.headers[\"...\"], ip.src, ssl,\n\
-                 \x20     ip.geoip.country, ip.geoip.asnum"
+                 \x20     ip.geoip.country, ip.geoip.continent, ip.geoip.asnum,\n\
+                 \x20     ip.geoip.asorg, ip.src.is_hosting, ip.src.is_vpn,\n\
+                 \x20     ip.src.is_tor, ip.src.is_anonymous"
             ))
         }
     };

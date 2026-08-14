@@ -31,7 +31,12 @@ pub struct Input<'a> {
     /// Where the client is, if a country database is loaded. None means unknown - and a
     /// rule comparing it therefore does not match, rather than matching everything.
     pub country: Option<&'a str>,
+    pub continent: Option<&'a str>,
     pub asn: Option<u32>,
+    pub as_org: Option<&'a str>,
+    pub hosting: bool,
+    pub vpn: bool,
+    pub tor: bool,
 }
 
 pub type Pred = Box<dyn Fn(&Input) -> bool + Send + Sync>;
@@ -60,8 +65,15 @@ fn cmp(field: &Field, op: Op, operand: &Operand, lists: &Lists) -> Result<Pred> 
     if matches!(field, Field::IpSrc) {
         return ip_cmp(op, operand, lists);
     }
-    if matches!(field, Field::Ssl) {
-        return Ok(Box::new(|i: &Input| i.tls));
+    /* the bare booleans, which carry no operator - `ssl`, `not ip.src.is_tor` */
+    match field {
+        Field::Ssl => return Ok(Box::new(|i: &Input| i.tls)),
+        Field::IpHosting => return Ok(Box::new(|i: &Input| i.hosting)),
+        Field::IpVpn => return Ok(Box::new(|i: &Input| i.vpn)),
+        Field::IpTor => return Ok(Box::new(|i: &Input| i.tor)),
+        /* deliberately hiding, as opposed to merely being in a datacenter */
+        Field::IpAnonymous => return Ok(Box::new(|i: &Input| i.vpn || i.tor)),
+        _ => {}
     }
     /* `ne` is just a negated `eq`, which also gives it sane multi-value semantics:
        "no value of this header equals x" rather than "some value doesn't".
@@ -106,7 +118,9 @@ fn cmp(field: &Field, op: Op, operand: &Operand, lists: &Lists) -> Result<Pred> 
 fn known(field: &Field, i: &Input) -> bool {
     match field {
         Field::GeoCountry => i.country.is_some(),
+        Field::GeoContinent => i.continent.is_some(),
         Field::GeoAsn => i.asn.is_some(),
+        Field::GeoAsOrg => i.as_org.is_some(),
         _ => true,
     }
 }
@@ -132,7 +146,14 @@ fn field_pred(field: Field, test: StrTest) -> Pred {
         /* compared as decimal text, so eq / in / matches all work unchanged. a number
            has exactly one spelling here, so there is nothing to normalise */
         Field::GeoAsn => i.asn.map(|n| test(&n.to_string())).unwrap_or(false),
-        Field::IpSrc | Field::Ssl => unreachable!("compiled separately"),
+        Field::GeoContinent => i.continent.map(&test).unwrap_or(false),
+        Field::GeoAsOrg => i.as_org.map(&test).unwrap_or(false),
+        Field::IpSrc
+        | Field::Ssl
+        | Field::IpHosting
+        | Field::IpVpn
+        | Field::IpTor
+        | Field::IpAnonymous => unreachable!("compiled separately"),
     })
 }
 
@@ -224,27 +245,130 @@ mod geo_tests {
     use super::*;
     use crate::waf::Lists;
 
-    fn input<'a>(headers: &'a HeaderMap, country: Option<&'a str>, asn: Option<u32>) -> Input<'a> {
-        Input {
+    /// Everything a geo lookup could have found, so a test states only what it cares about.
+    #[derive(Default, Clone, Copy)]
+    struct G<'a> {
+        country: Option<&'a str>,
+        continent: Option<&'a str>,
+        asn: Option<u32>,
+        as_org: Option<&'a str>,
+        hosting: bool,
+        vpn: bool,
+        tor: bool,
+    }
+
+    fn fires_with(expr: &str, g: G) -> bool {
+        let ast = crate::waf::parser::parse(expr).expect("expression should parse");
+        let pred = compile(&ast, &Lists::new()).expect("expression should compile");
+        let headers = HeaderMap::new();
+        pred(&Input {
             method: "GET",
             uri: "/",
             path: "/",
             query: "",
             host: "demo.local",
             body: "",
-            headers,
+            headers: &headers,
             ip: "203.0.113.9".parse().unwrap(),
             tls: false,
-            country,
-            asn,
-        }
+            country: g.country,
+            continent: g.continent,
+            asn: g.asn,
+            as_org: g.as_org,
+            hosting: g.hosting,
+            vpn: g.vpn,
+            tor: g.tor,
+        })
     }
 
     fn fires(expr: &str, country: Option<&str>, asn: Option<u32>) -> bool {
-        let ast = crate::waf::parser::parse(expr).expect("expression should parse");
-        let pred = compile(&ast, &Lists::new()).expect("expression should compile");
-        let headers = HeaderMap::new();
-        pred(&input(&headers, country, asn))
+        fires_with(
+            expr,
+            G {
+                country,
+                asn,
+                ..G::default()
+            },
+        )
+    }
+
+    #[test]
+    fn a_continent_rule_matches_the_continent() {
+        let g = G {
+            continent: Some("EU"),
+            ..G::default()
+        };
+        assert!(fires_with(r#"ip.geoip.continent eq "EU""#, g));
+        assert!(fires_with(r#"ip.geoip.continent in ["EU", "NA"]"#, g));
+        assert!(!fires_with(r#"ip.geoip.continent eq "AS""#, g));
+        /* and unknown still matches nothing, in either direction */
+        assert!(!fires_with(r#"ip.geoip.continent eq "EU""#, G::default()));
+        assert!(!fires_with(r#"ip.geoip.continent ne "EU""#, G::default()));
+    }
+
+    #[test]
+    fn an_as_org_rule_can_match_a_provider_by_name() {
+        /* the point of having the name as well as the number: one rule instead of the
+           dozens of ASNs a big cloud announces */
+        let g = G {
+            as_org: Some("AMAZON-02"),
+            ..G::default()
+        };
+        assert!(fires_with(r#"ip.geoip.asorg contains "AMAZON""#, g));
+        assert!(fires_with(r#"ip.geoip.asorg matches "(?i)amazon""#, g));
+        assert!(!fires_with(r#"ip.geoip.asorg contains "GOOGLE""#, g));
+    }
+
+    #[test]
+    fn the_bare_booleans_stand_alone_like_ssl() {
+        let datacenter = G {
+            hosting: true,
+            ..G::default()
+        };
+        assert!(fires_with("ip.src.is_hosting", datacenter));
+        assert!(!fires_with("ip.src.is_vpn", datacenter));
+        assert!(!fires_with("ip.src.is_tor", datacenter));
+        /* a cloud tenant is not the same as somebody hiding */
+        assert!(!fires_with("ip.src.is_anonymous", datacenter));
+        assert!(fires_with("not ip.src.is_tor", datacenter));
+    }
+
+    #[test]
+    fn anonymous_means_vpn_or_tor() {
+        let vpn = G {
+            vpn: true,
+            ..G::default()
+        };
+        let tor = G {
+            tor: true,
+            ..G::default()
+        };
+        assert!(fires_with("ip.src.is_anonymous", vpn));
+        assert!(fires_with("ip.src.is_anonymous", tor));
+        assert!(!fires_with("ip.src.is_anonymous", G::default()));
+    }
+
+    #[test]
+    fn the_signals_combine_with_the_rest_of_the_language() {
+        /* the rule somebody actually writes: a datacenter pretending to browse from a
+           country we do not serve */
+        let expr = r#"ip.src.is_hosting and ip.geoip.country eq "RU""#;
+        assert!(fires_with(
+            expr,
+            G {
+                hosting: true,
+                country: Some("RU"),
+                ..G::default()
+            }
+        ));
+        assert!(!fires_with(
+            expr,
+            G {
+                hosting: false,
+                country: Some("RU"),
+                ..G::default()
+            }
+        ));
     }
 
     #[test]
@@ -426,7 +550,12 @@ mod tests {
                 ip: self.ip,
                 tls: false,
                 country: None,
+                continent: None,
                 asn: None,
+                as_org: None,
+                hosting: false,
+                vpn: false,
+                tor: false,
             }
         }
     }
