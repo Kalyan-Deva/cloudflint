@@ -92,11 +92,22 @@ async fn main() -> Result<()> {
             /* and report in, so the fleet view knows this node exists at all. after the
                puller, so the first heartbeat is more likely to carry a real revision */
             if fleet_cfg.enabled {
+                let identity = cloudflint_edge::fleet::Identity::from_env();
+                /* fleet-wide rate limits are reported under the same identity: the control
+                   plane divides a limit between nodes, so it has to know which node is
+                   asking, and inventing a second name for the same box would double it */
+                cloudflint_edge::limits::global::spawn(
+                    snap.clone(),
+                    edge.buckets.clone(),
+                    url.clone(),
+                    identity.edge_id.clone(),
+                    fleet_cfg.ratelimit_sync,
+                );
                 cloudflint_edge::fleet::spawn(
                     edge.clone(),
                     url.clone(),
                     fleet_cfg.heartbeat,
-                    cloudflint_edge::fleet::Identity::from_env(),
+                    identity,
                 );
             }
         }

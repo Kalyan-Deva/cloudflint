@@ -74,6 +74,7 @@ impl Stage for RateLimit {
 
             let verdict = self.buckets.take(
                 key_of(&[&rule.id, &subject]),
+                &rule.id,
                 rule.capacity() * factor,
                 rule.refill_per_sec() * factor,
             );

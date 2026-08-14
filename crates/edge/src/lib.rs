@@ -67,6 +67,9 @@ pub struct Edge {
     /// ACME http-01 answers, checked before routing - see `proxy::handle`.
     pub challenges: Arc<acme::Challenges>,
     pub tls: Option<Arc<Tls>>,
+    /// Rate limit token buckets. Out here rather than inside the pipeline because
+    /// fleet-wide limits report and adjust them on a timer - see `limits::global`.
+    pub buckets: Arc<limits::Buckets>,
     /// Geo databases, if any are configured. Loaded at boot like certificates are, and
     /// for the same reason: a missing file should stop this node starting rather than
     /// fail the first request that asks where somebody is.
@@ -118,7 +121,13 @@ impl Edge {
             metrics.clone(),
             origins.clone(),
         ));
-        let pipeline = Arc::new(stages::build(store.clone(), metrics.clone(), fetcher.clone()));
+        let buckets = Arc::new(limits::Buckets::new(1 << 16));
+        let pipeline = Arc::new(stages::build(
+            store.clone(),
+            metrics.clone(),
+            fetcher.clone(),
+            buckets.clone(),
+        ));
         let node = boot.limits;
 
         /* only if some zone actually asks for probes - a zone with one origin and no
@@ -136,6 +145,7 @@ impl Edge {
             origins,
             challenges: acme::Challenges::new(),
             tls,
+            buckets,
             geo,
             revision: fleet::revision_cell(),
             started_at_ms: analytics::now_ms(),

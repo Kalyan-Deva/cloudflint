@@ -16,11 +16,16 @@ use crate::pipeline::{Pipeline, Stage};
 /// WAF, then the cache, then the origin - which stays last because it always answers.
 ///
 /// The store is passed in rather than made here because the admin API needs to purge it,
-/// the metrics registry because the admin API serves it, and the fetcher because the
-/// health prober makes requests of its own with it. The per-zone policy every stage works
-/// from still comes from the live snapshot.
-pub fn build(store: Arc<Store>, metrics: Arc<Metrics>, fetcher: Arc<origin::Fetcher>) -> Pipeline {
-    let buckets = Arc::new(Buckets::new(1 << 16));
+/// the metrics registry because the admin API serves it, the fetcher because the health
+/// prober makes requests of its own with it, and the buckets because fleet-wide limits
+/// report and adjust them from outside the request path. The per-zone policy every stage
+/// works from still comes from the live snapshot.
+pub fn build(
+    store: Arc<Store>,
+    metrics: Arc<Metrics>,
+    fetcher: Arc<origin::Fetcher>,
+    buckets: Arc<Buckets>,
+) -> Pipeline {
     let health = Arc::new(Health::new());
 
     Pipeline::new(vec![

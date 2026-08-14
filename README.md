@@ -340,6 +340,41 @@ Nodes are listed in the dashboard's **Fleet** page, with counts per region. A no
 has been decommissioned can be forgotten with `DELETE /v1/edges/{id}`; one that is merely
 unreachable reappears on its next heartbeat.
 
+### Fleet-wide rate limits
+
+A limit counted per node is not the limit you wrote down: ten edges each allowing 100 a
+minute is a limit of a thousand. Give a rule `scope: global` and the fleet divides one limit
+between its nodes instead.
+
+```yaml
+    rate_limits:
+      - id: tight-per-ip
+        key: ip
+        requests: 100
+        window_secs: 60
+        scope: global   # default is `node`
+```
+
+The control plane never authorises a request - it is not in the request path and never will
+be. On a timer each edge reports the busiest keys it is seeing and is told **what share of
+that key's fleet-wide traffic is its own**; it then applies that fraction of the configured
+limit. Keys are hashed on the edge, so no client address reaches the control plane.
+
+What follows from that, all deliberate:
+
+- One edge gets the whole limit, so a single-node deployment behaves exactly as `node` does.
+- An unreachable control plane falls back to per-node limits - never to no limits.
+- It converges rather than being exact: between syncs a node enforces its last share, so a
+  sudden shift in traffic can overshoot for one interval. `fleet.ratelimit_sync_secs`
+  (default 5) sets how fast it converges.
+- Only heavy hitters are shared. A key near its limit is high-volume by definition; the long
+  tail keeps counting locally, where per-node was already correct.
+- A node that stops reporting stops counting after 15 seconds, so a decommissioned edge
+  cannot keep shrinking everyone else's share.
+
+`GET /v1/ratelimit/spread` lists the keys seen on the most edges at once - one address on
+every node is a distributed attack, the same volume on one node is a noisy client.
+
 ### Where a request is from
 
 `ip.geoip.country` and `ip.geoip.asnum` need a database. Name one and they work; name none

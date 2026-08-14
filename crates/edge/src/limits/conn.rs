@@ -79,7 +79,7 @@ impl ConnLimits {
         if self.new_per_sec > 0.0 {
             let key = key_of(&["conn", &ip.to_string()]);
             /* one second of connections is also the burst */
-            if !self.rate.take(key, self.new_per_sec, self.new_per_sec).allowed {
+            if !self.rate.take(key, "conn", self.new_per_sec, self.new_per_sec).allowed {
                 return Err(self.refuse(Refusal::TooFast));
             }
         }

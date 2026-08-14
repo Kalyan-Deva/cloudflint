@@ -47,6 +47,26 @@ pub struct Config {
     pub zones: Vec<Zone>,
 }
 
+/// Whether a rate limit counts on one node or across the whole fleet.
+///
+/// `Node` is the default and always will be: switching the meaning of an existing config
+/// silently would tighten every limit anybody has already written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Scope {
+    #[default]
+    Node,
+    Global,
+}
+
+impl Scope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Scope::Node => "node",
+            Scope::Global => "global",
+        }
+    }
+}
+
 /// Where the geo databases are. Node-wide: which country an address is in cannot differ
 /// per hostname.
 #[derive(Debug, Clone, Default)]
@@ -66,6 +86,10 @@ impl GeoipConfig {
 pub struct FleetConfig {
     pub enabled: bool,
     pub heartbeat: Duration,
+    /// How often to report rate limit heavy hitters. Shorter than the heartbeat because a
+    /// limit converges only as fast as this, and longer than a request because it is a
+    /// whole http round trip.
+    pub ratelimit_sync: Duration,
 }
 
 impl Default for FleetConfig {
@@ -73,6 +97,7 @@ impl Default for FleetConfig {
         FleetConfig {
             enabled: true,
             heartbeat: Duration::from_secs(15),
+            ratelimit_sync: Duration::from_secs(5),
         }
     }
 }
@@ -420,9 +445,13 @@ fn fleet_from(raw: raw::Fleet) -> Result<FleetConfig> {
     if raw.enabled && raw.heartbeat_secs == 0 {
         bail!("fleet.heartbeat_secs must be > 0");
     }
+    if raw.enabled && raw.ratelimit_sync_secs == 0 {
+        bail!("fleet.ratelimit_sync_secs must be > 0");
+    }
     Ok(FleetConfig {
         enabled: raw.enabled,
         heartbeat: Duration::from_secs(raw.heartbeat_secs),
+        ratelimit_sync: Duration::from_secs(raw.ratelimit_sync_secs),
     })
 }
 
@@ -450,6 +479,15 @@ fn rate_limits_from(
         if !matches!(r.action, waf::Action::Block | waf::Action::Log) {
             bail!("zone `{zone}`: rate limit `{}` can only block or log", r.id);
         }
+
+        let scope = match r.scope.as_str() {
+            "node" => Scope::Node,
+            "global" => Scope::Global,
+            other => bail!(
+                "zone `{zone}`: rate limit `{}` has scope `{other}` - use `node` or `global`",
+                r.id
+            ),
+        };
 
         let subject = match r.key.as_str() {
             "ip" => Subject::Ip,
@@ -484,6 +522,7 @@ fn rate_limits_from(
 
         out.push(RateRule {
             id: r.id,
+            scope,
             matcher,
             subject,
             requests: r.requests,
@@ -832,6 +871,8 @@ mod raw {
         pub enabled: bool,
         #[serde(default = "default_heartbeat")]
         pub heartbeat_secs: u64,
+        #[serde(default = "default_ratelimit_sync")]
+        pub ratelimit_sync_secs: u64,
     }
 
     impl Default for Fleet {
@@ -839,6 +880,7 @@ mod raw {
             Fleet {
                 enabled: yes(),
                 heartbeat_secs: default_heartbeat(),
+                ratelimit_sync_secs: default_ratelimit_sync(),
             }
         }
     }
@@ -1083,6 +1125,9 @@ mod raw {
         pub window_secs: u64,
         #[serde(default = "block_action")]
         pub action: waf::Action,
+        /// `node` counts on this edge alone; `global` divides the limit across the fleet.
+        #[serde(default = "default_scope")]
+        pub scope: String,
     }
 
     #[derive(Deserialize)]
@@ -1235,6 +1280,14 @@ mod raw {
     /// enough that a hundred edges are not a load on the control plane by themselves.
     fn default_heartbeat() -> u64 {
         15
+    }
+    /// Per node, because that is what the limit has always meant and a silent change to
+    /// fleet-wide would quietly tighten every existing config.
+    fn default_scope() -> String {
+        "node".to_string()
+    }
+    fn default_ratelimit_sync() -> u64 {
+        5
     }
     fn default_timeout_ms() -> u64 {
         30_000
