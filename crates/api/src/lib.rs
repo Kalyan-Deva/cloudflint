@@ -7,6 +7,7 @@
 
 pub mod db;
 pub mod metrics;
+pub mod ratelimit;
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -37,6 +38,9 @@ pub struct Api {
     /// too, so asking politely is not enough.
     pub edge_token: Option<Arc<String>>,
     pub metrics: Arc<ApiMetrics>,
+    /// Fleet-wide rate limit counters. In memory: written every few seconds by every
+    /// node, and worthless after a restart - the fleet refills it within one interval.
+    pub limits: Arc<ratelimit::Fleet>,
 }
 
 impl Api {
@@ -46,6 +50,7 @@ impl Api {
             edges: Arc::new(edges),
             edge_token,
             metrics: ApiMetrics::new(),
+            limits: Arc::new(ratelimit::Fleet::new()),
         }
     }
 }
@@ -63,6 +68,8 @@ pub fn router(api: Api) -> Router {
         .route("/v1/analytics/timeseries", get(timeseries))
         .route("/v1/zones", get(zones))
         .route("/v1/edges", get(list_edges))
+        .route("/v1/ratelimit/sync", post(ratelimit_sync))
+        .route("/v1/ratelimit/spread", get(ratelimit_spread))
         .route("/v1/edges/{id}", axum::routing::delete(forget_edge))
         .route("/v1/edges/{id}/heartbeat", post(heartbeat))
         .route("/v1/waf/test", post(waf_test))
@@ -433,6 +440,46 @@ async fn heartbeat(
        be running, and reports next time whether it got there */
     let desired = api.db.active_config().ok().flatten().map(|c| c.revision);
     Ok(Json(json!({ "desired_revision": desired })).into_response())
+}
+
+/// An edge reporting what it is seeing, and being told its share.
+///
+/// This never authorises a request - see `ratelimit`. It answers "what fraction of this
+/// key's fleet traffic is yours", and the edge multiplies its own configured limit by that.
+async fn ratelimit_sync(
+    State(api): State<Api>,
+    Json(report): Json<ratelimit::Report>,
+) -> ApiResult {
+    if report.edge_id.trim().is_empty() || report.rule.trim().is_empty() {
+        return Err(bad_request("a report needs an edge_id and a rule"));
+    }
+    /* a node with a lot of hot keys must not be able to make this process do unbounded
+       work in one request; the edge only ever sends its heavy hitters anyway */
+    if report.keys.len() > 512 {
+        return Err(bad_request("too many keys in one report - send the heavy hitters"));
+    }
+
+    let shares = api.limits.sync(&report);
+    api.metrics.ratelimit_syncs.inc(&[]);
+    /* swept here rather than on a timer: this is the only thing that writes to it, so
+       there is nothing to clean up when nobody is syncing */
+    api.limits.sweep();
+
+    Ok(Json(json!({ "shares": shares })).into_response())
+}
+
+/// The keys the fleet is seeing on the most edges at once.
+async fn ratelimit_spread(State(api): State<Api>) -> ApiResult {
+    let spread: Vec<_> = api
+        .limits
+        .spread(50)
+        .into_iter()
+        .map(|(rule, key, edges, rate)| {
+            json!({ "rule": rule, "key": format!("{key:016x}"), "edges": edges, "rate": rate })
+        })
+        .collect();
+
+    Ok(Json(json!({ "tracked": api.limits.tracked(), "keys": spread })).into_response())
 }
 
 async fn list_edges(State(api): State<Api>) -> ApiResult {

@@ -28,6 +28,7 @@ pub struct ApiMetrics {
     pub config_writes: Counter,
     pub purges: Counter,
     pub heartbeats: Counter,
+    pub ratelimit_syncs: Counter,
 }
 
 impl ApiMetrics {
@@ -55,6 +56,11 @@ impl ApiMetrics {
                 "Heartbeats accepted from edges.",
                 &[],
             ),
+            ratelimit_syncs: Counter::new(
+                "cloudflint_api_ratelimit_syncs_total",
+                "Rate limit reports accepted from edges.",
+                &[],
+            ),
         })
     }
 
@@ -70,6 +76,7 @@ impl ApiMetrics {
         self.config_writes.render_into(&mut out);
         self.purges.render_into(&mut out);
         self.heartbeats.render_into(&mut out);
+        self.ratelimit_syncs.render_into(&mut out);
 
         if let Some(fleet) = fleet {
             metrics::labelled_gauges(
