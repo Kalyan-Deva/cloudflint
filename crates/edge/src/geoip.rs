@@ -233,6 +233,64 @@ impl Database {
     }
 }
 
+/// The databases this node has, ready to answer a request.
+///
+/// Two files rather than one because that is how they are published: country and ASN are
+/// separate downloads, and a deployment may well have only one of them.
+///
+/// Loaded here rather than in `config::parse`, for the same reason certificates are: the
+/// control plane validates config it has no files for, and a missing database should stop
+/// this node starting rather than fail the first request of the day.
+pub struct Geo {
+    country: Option<Database>,
+    asn: Option<Database>,
+}
+
+impl Geo {
+    /// None when no database is configured at all, so the request path can skip the
+    /// lookup entirely rather than asking two empty questions per request.
+    pub fn load(cfg: &crate::config::GeoipConfig) -> Result<Option<Geo>> {
+        if cfg.country.is_none() && cfg.asn.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(Geo {
+            country: cfg.country.as_deref().map(Database::open).transpose()?,
+            asn: cfg.asn.as_deref().map(Database::open).transpose()?,
+        }))
+    }
+
+    /// Whatever both files together know about an address.
+    pub fn lookup(&self, ip: IpAddr) -> Located {
+        let mut found = Located::default();
+        if let Some(db) = &self.country {
+            let c = db.lookup(ip);
+            found.country = c.country;
+            /* a combined database may carry both, so don't throw the asn away */
+            found.asn = c.asn;
+            found.as_org = c.as_org;
+        }
+        if let Some(db) = &self.asn {
+            let a = db.lookup(ip);
+            found.asn = a.asn.or(found.asn);
+            found.as_org = a.as_org.or(found.as_org);
+            found.country = found.country.or(a.country);
+        }
+        found
+    }
+
+    /// What was loaded, for the admin API and the startup log.
+    pub fn describe(&self) -> Vec<(&'static str, &str)> {
+        let mut out = Vec::new();
+        if let Some(db) = &self.country {
+            out.push(("country", db.kind.as_str()));
+        }
+        if let Some(db) = &self.asn {
+            out.push(("asn", db.kind.as_str()));
+        }
+        out
+    }
+}
+
 /// Decodes the self-describing data section.
 ///
 /// `base` is where pointers are measured from - the data section for records, and the

@@ -58,7 +58,7 @@ impl Stage for RateLimit {
            zone is tightened right now, not how many times it has been */
         self.metrics.ratelimit_factor.set(&[&zone.name], factor);
 
-        let decoded = Decoded::new(req, &ctx.host, ctx.client, ctx.tls);
+        let decoded = Decoded::new(req, &ctx.host, ctx.client, ctx.tls, &ctx.geo);
         let input = decoded.input("");
 
         for rule in &zone.rate_limits {

@@ -130,6 +130,13 @@ async fn route(
        something in front terminated TLS, which is not the same as the client not
        using it. `ssl` rules and the forwarded-proto we pass on both mean the client */
     let tls = cfg.client_ip.resolve_tls(peer, req.headers(), tls);
+    /* one lookup for the whole request, keyed on the *client* rather than the peer - a
+       country rule behind a load balancer must mean where the visitor is, not where the
+       balancer is. Nothing to do at all when no database is loaded */
+    let geo = match &edge.geo {
+        Some(geo) => geo.lookup(client),
+        None => crate::geoip::Located::default(),
+    };
 
     let Some(host) = host_of(&req) else {
         return Outcome {
@@ -154,7 +161,12 @@ async fn route(
     let body = with_read_timeout(adapt(body), edge.node.body_read_timeout);
 
     let mut ctx = Ctx::new(
-        Caller { peer, client, tls },
+        Caller {
+            peer,
+            client,
+            tls,
+            geo,
+        },
         host,
         cfg,
         zone,

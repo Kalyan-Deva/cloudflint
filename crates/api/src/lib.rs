@@ -527,6 +527,14 @@ pub struct WafTest {
     /// Pretend the request arrived over https, for rules that check `ssl`.
     #[serde(default)]
     pub tls: bool,
+    /// Pretend the address is in this country, for rules that check `ip.geoip.country`.
+    /// Given rather than looked up: the control plane has no geo database - the edges do -
+    /// and the point of the tester is to ask "what would this rule do to *this* request".
+    #[serde(default)]
+    pub country: Option<String>,
+    /// Likewise for `ip.geoip.asnum`.
+    #[serde(default)]
+    pub asn: Option<u32>,
 }
 
 fn get_method() -> String {
@@ -576,6 +584,8 @@ async fn waf_test(State(api): State<Api>, Json(t): Json<WafTest>) -> ApiResult {
         .parse()
         .map_err(|_| bad_request(format!("`{}` is not an ip address", t.ip)))?;
 
+    let country = t.country.as_ref().map(|c| c.trim().to_ascii_uppercase());
+
     /* decoded exactly as the edge decodes it, or the tester would lie */
     let path = decode(&t.path, false);
     let query = decode(&t.query, true);
@@ -597,6 +607,10 @@ async fn waf_test(State(api): State<Api>, Json(t): Json<WafTest>) -> ApiResult {
             headers: &headers,
             ip,
             tls: t.tls,
+            /* upper-cased so a tester typing "gb" gets the same answer the edge would
+               give, which reports what the database says - an ISO code, upper case */
+            country: country.as_deref(),
+            asn: t.asn,
         },
         !t.body.is_empty(),
     );

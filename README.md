@@ -340,6 +340,35 @@ Nodes are listed in the dashboard's **Fleet** page, with counts per region. A no
 has been decommissioned can be forgotten with `DELETE /v1/edges/{id}`; one that is merely
 unreachable reappears on its next heartbeat.
 
+### Where a request is from
+
+`ip.geoip.country` and `ip.geoip.asnum` need a database. Name one and they work; name none
+and a rule using them is refused at config load rather than never matching.
+
+```yaml
+geoip:
+  country: "GeoLite2-Country.mmdb"
+  asn: "GeoLite2-ASN.mmdb"
+```
+
+No database ships with Cloudflint — none of them can be redistributed. Any MaxMind DB file
+works: GeoLite2 (free, account required), DB-IP's free download (no account), or a paid
+MaxMind database. Both keys are optional; give whichever you have.
+
+```
+ip.geoip.country in ["CN", "RU"]
+ip.geoip.asnum eq "64512"
+```
+
+The ASN is compared as the number written out, so `eq`, `in` and `matches` all work as they
+do everywhere else. An address the database cannot place matches **neither** `eq` nor `ne` —
+so a missing or stale database makes a geo rule inert rather than making `ne` match every
+request on earth. Lookups use the client address, not the peer, so a country rule behind a
+load balancer means where the visitor is.
+
+The rule tester takes `country` and `asn` directly, since the control plane has no database
+of its own — the point is to ask what a rule would do to a given request.
+
 ### Behind a load balancer
 
 Rate limits, `ip.src` rules and the log all key on the client's address. By default that
@@ -365,6 +394,7 @@ there is a request to read a header from.
 http.request.method            http.request.uri          http.request.uri.path
 http.request.uri.query         http.request.body         http.host
 http.request.headers["name"]   ip.src                    ssl
+ip.geoip.country               ip.geoip.asnum
 ```
 
 Operators: `eq` `ne` `contains` `matches` `in`, combined with `and` `or` `not`.

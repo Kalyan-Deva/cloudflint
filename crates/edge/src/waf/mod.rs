@@ -32,10 +32,19 @@ pub struct Decoded<'a> {
     path: Cow<'a, str>,
     query: Cow<'a, str>,
     uri: Cow<'a, str>,
+    /// Resolved once per request, before any stage runs - two stages asking the same
+    /// question of the same database would be two lookups for one answer.
+    geo: &'a crate::geoip::Located,
 }
 
 impl<'a> Decoded<'a> {
-    pub fn new(req: &'a Request<Body>, host: &'a str, ip: IpAddr, tls: bool) -> Self {
+    pub fn new(
+        req: &'a Request<Body>,
+        host: &'a str,
+        ip: IpAddr,
+        tls: bool,
+        geo: &'a crate::geoip::Located,
+    ) -> Self {
         Decoded {
             method: req.method().as_str(),
             host,
@@ -48,6 +57,7 @@ impl<'a> Decoded<'a> {
                 req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/"),
                 true,
             ),
+            geo,
         }
     }
 
@@ -62,6 +72,8 @@ impl<'a> Decoded<'a> {
             headers: self.headers,
             ip: self.ip,
             tls: self.tls,
+            country: self.geo.country.as_deref(),
+            asn: self.geo.asn,
         }
     }
 }
@@ -152,6 +164,7 @@ struct Rule {
     action: Action,
     severity: Severity,
     needs_body: bool,
+    needs_geoip: bool,
     pred: compile::Pred,
 }
 
@@ -159,6 +172,7 @@ struct Rule {
 pub struct Ruleset {
     rules: Vec<Rule>,
     needs_body: bool,
+    needs_geoip: bool,
 }
 
 impl std::fmt::Debug for Ruleset {
@@ -183,6 +197,12 @@ impl Ruleset {
     /// True if any rule looks at the body. When false the body is never buffered.
     pub fn needs_body(&self) -> bool {
         self.needs_body
+    }
+
+    /// True if any rule asks where an address is. Config load refuses such a rule when no
+    /// database is named, rather than letting it never match.
+    pub fn needs_geoip(&self) -> bool {
+        self.needs_geoip
     }
 
     pub fn rule_ids(&self) -> Vec<&str> {
@@ -362,7 +382,12 @@ fn compile_all(raw: Vec<RawRule>, lists: &Lists) -> Result<Ruleset> {
     }
 
     let needs_body = rules.iter().any(|r| r.needs_body);
-    Ok(Ruleset { rules, needs_body })
+    let needs_geoip = rules.iter().any(|r| r.needs_geoip);
+    Ok(Ruleset {
+        rules,
+        needs_body,
+        needs_geoip,
+    })
 }
 
 fn compile_one(raw: &RawRule, lists: &Lists) -> Result<Rule> {
@@ -372,6 +397,7 @@ fn compile_one(raw: &RawRule, lists: &Lists) -> Result<Rule> {
         action: raw.action,
         severity: raw.severity,
         needs_body: expr.needs_body(),
+        needs_geoip: expr.needs_geoip(),
         pred: compile::compile(&expr, lists)?,
     })
 }
@@ -428,6 +454,8 @@ mod tests {
             headers: &headers,
             ip,
             tls: false,
+            country: None,
+            asn: None,
         })
     }
 
@@ -499,6 +527,8 @@ mod tests {
                 headers: &headers,
                 ip: "203.0.113.9".parse().unwrap(),
                 tls: false,
+                country: None,
+                asn: None,
             };
             let mut log = Vec::new();
             assert!(
@@ -534,6 +564,8 @@ rules:
             headers: &headers,
             ip: "203.0.113.9".parse().unwrap(),
             tls: false,
+            country: None,
+            asn: None,
         };
         let mut log = Vec::new();
         let out = match rules.evaluate(&input, Phase::Head, &mut log) {
@@ -597,6 +629,8 @@ rules:
             headers: &headers,
             ip: "203.0.113.9".parse().unwrap(),
             tls: false,
+            country: None,
+            asn: None,
         };
 
         let mut log = Vec::new();

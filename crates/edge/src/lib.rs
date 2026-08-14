@@ -67,6 +67,10 @@ pub struct Edge {
     /// ACME http-01 answers, checked before routing - see `proxy::handle`.
     pub challenges: Arc<acme::Challenges>,
     pub tls: Option<Arc<Tls>>,
+    /// Geo databases, if any are configured. Loaded at boot like certificates are, and
+    /// for the same reason: a missing file should stop this node starting rather than
+    /// fail the first request that asks where somebody is.
+    pub geo: Option<Arc<geoip::Geo>>,
     /// The config revision being served, or `fleet::NO_REVISION` when this node
     /// follows a local file. Written by the config puller, read by the heartbeat -
     /// which is what makes a rollout acknowledgement mean anything.
@@ -83,6 +87,25 @@ impl Edge {
     }
 
     pub fn with_tls(snap: Arc<Snapshot>, tls: Option<Arc<Tls>>) -> Arc<Self> {
+        Self::build(snap, tls, None)
+    }
+
+    /// The full form, used by `main`. Everything loaded from disk arrives here rather
+    /// than being read inside the constructor, so a test can build an edge without a
+    /// filesystem.
+    pub fn with_tls_and_geo(
+        snap: Arc<Snapshot>,
+        tls: Option<Arc<Tls>>,
+        geo: Option<Arc<geoip::Geo>>,
+    ) -> Arc<Self> {
+        Self::build(snap, tls, geo)
+    }
+
+    fn build(
+        snap: Arc<Snapshot>,
+        tls: Option<Arc<Tls>>,
+        geo: Option<Arc<geoip::Geo>>,
+    ) -> Arc<Self> {
         let boot = snap.current();
         let store = Arc::new(Store::new(
             boot.cache.max_bytes,
@@ -113,6 +136,7 @@ impl Edge {
             origins,
             challenges: acme::Challenges::new(),
             tls,
+            geo,
             revision: fleet::revision_cell(),
             started_at_ms: analytics::now_ms(),
             pipeline,

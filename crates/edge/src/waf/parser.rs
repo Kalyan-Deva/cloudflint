@@ -314,16 +314,16 @@ fn field_from(name: &str, key: Option<&str>, at: usize) -> Result<Field> {
         ),
         ("ip.src", None) => Field::IpSrc,
         ("ssl", None) => Field::Ssl,
-        ("ip.geoip.country", _) => bail!(
-            "`{name}` is not available yet - geoip needs a database (column {col})"
-        ),
+        ("ip.geoip.country", None) => Field::GeoCountry,
+        ("ip.geoip.asnum", None) => Field::GeoAsn,
         (_, Some(_)) => bail!("`{name}` does not take a [\"...\"] key (column {col})"),
         _ => {
             return Err(anyhow!(
                 "unknown field `{name}` at column {col}\n\
                  have: http.request.method, http.request.uri, http.request.uri.path,\n\
                  \x20     http.request.uri.query, http.request.body, http.host,\n\
-                 \x20     http.request.headers[\"...\"], ip.src"
+                 \x20     http.request.headers[\"...\"], ip.src, ssl,\n\
+                 \x20     ip.geoip.country, ip.geoip.asnum"
             ))
         }
     };
@@ -439,8 +439,32 @@ mod tests {
     }
 
     #[test]
-    fn says_when_a_field_is_not_ready_yet() {
-        let e = parse(r#"ip.geoip.country eq "US""#).unwrap_err().to_string();
-        assert!(e.contains("not available yet"), "unhelpful error: {e}");
+    fn the_geoip_fields_parse_now_that_there_is_a_reader_for_them() {
+        assert_eq!(
+            parse(r#"ip.geoip.country eq "US""#).unwrap(),
+            Expr::Cmp {
+                field: Field::GeoCountry,
+                op: Op::Eq,
+                operand: Operand::Str("US".into()),
+            }
+        );
+        assert_eq!(
+            parse(r#"ip.geoip.asnum eq "64512""#).unwrap(),
+            Expr::Cmp {
+                field: Field::GeoAsn,
+                op: Op::Eq,
+                operand: Operand::Str("64512".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn an_unknown_field_lists_the_ones_that_exist() {
+        let e = match parse(r#"ip.geoip.city eq "London""#) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("there is no city field"),
+        };
+        assert!(e.contains("unknown field"), "unhelpful error: {e}");
+        assert!(e.contains("ip.geoip.country"), "the list should mention what does exist: {e}");
     }
 }

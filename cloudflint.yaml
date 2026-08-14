@@ -36,6 +36,14 @@ limits:
   # this long. Kubernetes' own grace period is 30s, so match it or lower it.
   drain_timeout_secs: 30
 
+# Databases for ip.geoip.country and ip.geoip.asnum. Nothing ships with Cloudflint -
+# none of these files can be redistributed - so point at what is on the box. Any
+# MaxMind DB works: GeoLite2, DB-IP's free download, or a paid database. Leave this out
+# and a rule using those fields is refused at config load rather than never matching.
+# geoip:
+#   country: "GeoLite2-Country.mmdb"
+#   asn: "GeoLite2-ASN.mmdb"
+
 # Reporting in to the control plane, for the fleet view. A no-op without a
 # `control_plane` set. Only the timing lives here: which node this is comes from the
 # environment (CLOUDFLINT_EDGE_ID, CLOUDFLINT_REGION, CLOUDFLINT_EDGE_LABEL), because

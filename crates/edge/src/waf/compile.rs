@@ -28,6 +28,10 @@ pub struct Input<'a> {
     pub ip: IpAddr,
     /// Whether the client reached the edge over https.
     pub tls: bool,
+    /// Where the client is, if a country database is loaded. None means unknown - and a
+    /// rule comparing it therefore does not match, rather than matching everything.
+    pub country: Option<&'a str>,
+    pub asn: Option<u32>,
 }
 
 pub type Pred = Box<dyn Fn(&Input) -> bool + Send + Sync>;
@@ -60,10 +64,16 @@ fn cmp(field: &Field, op: Op, operand: &Operand, lists: &Lists) -> Result<Pred> 
         return Ok(Box::new(|i: &Input| i.tls));
     }
     /* `ne` is just a negated `eq`, which also gives it sane multi-value semantics:
-       "no value of this header equals x" rather than "some value doesn't" */
+       "no value of this header equals x" rather than "some value doesn't".
+
+       Except for a field that can be *absent*. Negating `eq` there turns "not GB" into
+       "not known to be GB", so a node whose geo database is missing would match every
+       request - a `ne` rule that blocks would block the world. `ne` therefore means
+       "known, and different", and an unknown address matches neither direction. */
     if op == Op::Ne {
         let eq = cmp(field, Op::Eq, operand, lists)?;
-        return Ok(Box::new(move |i| !eq(i)));
+        let field = field.clone();
+        return Ok(Box::new(move |i| known(&field, i) && !eq(i)));
     }
 
     let test: StrTest = match op {
@@ -89,6 +99,18 @@ fn cmp(field: &Field, op: Op, operand: &Operand, lists: &Lists) -> Result<Pred> 
     Ok(field_pred(field.clone(), test))
 }
 
+/// Whether this request has a value for the field at all.
+///
+/// Only the geo fields can be missing; everything else is always present, even if empty,
+/// so an absent header is an empty string rather than an unknown one.
+fn known(field: &Field, i: &Input) -> bool {
+    match field {
+        Field::GeoCountry => i.country.is_some(),
+        Field::GeoAsn => i.asn.is_some(),
+        _ => true,
+    }
+}
+
 fn field_pred(field: Field, test: StrTest) -> Pred {
     Box::new(move |i: &Input| match &field {
         Field::Method => test(i.method),
@@ -103,6 +125,13 @@ fn field_pred(field: Field, test: StrTest) -> Pred {
             .get_all(name.as_str())
             .iter()
             .any(|v| v.to_str().map(&test).unwrap_or(false)),
+        /* an address we cannot place matches nothing. the alternative - treating unknown
+           as a value - would make `ip.geoip.country ne "GB"` block every request the
+           moment the database went missing */
+        Field::GeoCountry => i.country.map(&test).unwrap_or(false),
+        /* compared as decimal text, so eq / in / matches all work unchanged. a number
+           has exactly one spelling here, so there is nothing to normalise */
+        Field::GeoAsn => i.asn.map(|n| test(&n.to_string())).unwrap_or(false),
         Field::IpSrc | Field::Ssl => unreachable!("compiled separately"),
     })
 }
@@ -187,6 +216,94 @@ impl Net {
                silently start matching the other */
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod geo_tests {
+    use super::*;
+    use crate::waf::Lists;
+
+    fn input<'a>(headers: &'a HeaderMap, country: Option<&'a str>, asn: Option<u32>) -> Input<'a> {
+        Input {
+            method: "GET",
+            uri: "/",
+            path: "/",
+            query: "",
+            host: "demo.local",
+            body: "",
+            headers,
+            ip: "203.0.113.9".parse().unwrap(),
+            tls: false,
+            country,
+            asn,
+        }
+    }
+
+    fn fires(expr: &str, country: Option<&str>, asn: Option<u32>) -> bool {
+        let ast = crate::waf::parser::parse(expr).expect("expression should parse");
+        let pred = compile(&ast, &Lists::new()).expect("expression should compile");
+        let headers = HeaderMap::new();
+        pred(&input(&headers, country, asn))
+    }
+
+    #[test]
+    fn a_country_rule_matches_the_country() {
+        assert!(fires(r#"ip.geoip.country eq "GB""#, Some("GB"), None));
+        assert!(!fires(r#"ip.geoip.country eq "GB""#, Some("DE"), None));
+    }
+
+    #[test]
+    fn a_country_rule_can_take_a_list() {
+        let expr = r#"ip.geoip.country in ["CN", "RU", "KP"]"#;
+        assert!(fires(expr, Some("RU"), None));
+        assert!(!fires(expr, Some("GB"), None));
+    }
+
+    #[test]
+    fn an_unknown_country_matches_nothing() {
+        /* the important half: with no database loaded every geo rule must be inert, not
+           universally true. `ne` is the dangerous direction - it would block the world */
+        assert!(!fires(r#"ip.geoip.country eq "GB""#, None, None));
+        assert!(!fires(r#"ip.geoip.country ne "GB""#, None, None));
+        assert!(!fires(r#"ip.geoip.country in ["CN", "RU"]"#, None, None));
+    }
+
+    #[test]
+    fn ne_on_a_known_country_still_works() {
+        assert!(fires(r#"ip.geoip.country ne "GB""#, Some("DE"), None));
+        assert!(!fires(r#"ip.geoip.country ne "GB""#, Some("GB"), None));
+    }
+
+    #[test]
+    fn an_asn_is_compared_as_its_number_written_out() {
+        assert!(fires(r#"ip.geoip.asnum eq "64512""#, None, Some(64512)));
+        assert!(!fires(r#"ip.geoip.asnum eq "64512""#, None, Some(64513)));
+        /* no leading-zero or whitespace spellings to worry about, because the text comes
+           from formatting the number rather than from the request */
+        assert!(!fires(r#"ip.geoip.asnum eq "064512""#, None, Some(64512)));
+    }
+
+    #[test]
+    fn an_asn_rule_can_take_a_list() {
+        let expr = r#"ip.geoip.asnum in ["64512", "64513"]"#;
+        assert!(fires(expr, None, Some(64513)));
+        assert!(!fires(expr, None, Some(64514)));
+    }
+
+    #[test]
+    fn an_unknown_asn_matches_nothing() {
+        assert!(!fires(r#"ip.geoip.asnum eq "64512""#, None, None));
+        assert!(!fires(r#"ip.geoip.asnum ne "64512""#, None, None));
+    }
+
+    #[test]
+    fn country_and_asn_combine_with_everything_else() {
+        /* the shape a real rule takes: somewhere hostile, on a hosting provider's asn */
+        let expr = r#"ip.geoip.country eq "RU" and ip.geoip.asnum eq "64512""#;
+        assert!(fires(expr, Some("RU"), Some(64512)));
+        assert!(!fires(expr, Some("RU"), Some(64513)));
+        assert!(!fires(expr, Some("GB"), Some(64512)));
     }
 }
 
@@ -308,6 +425,8 @@ mod tests {
                 headers: &self.headers,
                 ip: self.ip,
                 tls: false,
+                country: None,
+                asn: None,
             }
         }
     }

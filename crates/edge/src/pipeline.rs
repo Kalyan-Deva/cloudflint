@@ -39,12 +39,15 @@ impl StageError {
 /// Who a request came from, and how. These three are worked out together in
 /// `proxy::route` and always travel together - splitting them across arguments is how
 /// you end up passing the peer where the client was meant.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Caller {
     pub peer: SocketAddr,
     pub client: IpAddr,
     /// Whether the *client* used https, not necessarily whether our own leg did.
     pub tls: bool,
+    /// Where the client is, looked up once before routing. Empty when no database is
+    /// loaded, which is the default.
+    pub geo: crate::geoip::Located,
 }
 
 /// Everything a stage is allowed to see about the request in flight.
@@ -64,6 +67,9 @@ pub struct Ctx<'a> {
     pub tls: bool,
     /// Set by the pipeline to whichever stage produced the response.
     pub decided_by: &'static str,
+    /// Country and ASN for `client`, resolved once per request. Both the WAF and the
+    /// rate limiter read it, so neither pays for a second lookup.
+    pub geo: crate::geoip::Located,
     req: Option<Request<Body>>,
 }
 
@@ -80,6 +86,7 @@ impl<'a> Ctx<'a> {
             peer: caller.peer,
             client: caller.client,
             tls: caller.tls,
+            geo: caller.geo,
             host,
             cfg,
             zone,
@@ -259,6 +266,7 @@ zones:
                 peer: "127.0.0.1:1234".parse().unwrap(),
                 client: "127.0.0.1".parse().unwrap(),
                 tls: false,
+                geo: Default::default(),
             },
             "demo.local".into(),
             &cfg,

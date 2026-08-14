@@ -31,6 +31,9 @@ async fn main() -> Result<()> {
     let tls = Tls::new(&cfg)?.map(Arc::new);
     /* and the same for the certificates we present *to* origins */
     cloudflint_edge::origin_tls::preflight(&cfg)?;
+    /* geo databases too: a rule asking where a client is, on a node whose database is
+       missing, should be a startup failure rather than a rule that quietly never fires */
+    let geo = cloudflint_edge::geoip::Geo::load(&cfg.geoip)?.map(Arc::new);
 
     let listener = TcpListener::bind(listen)
         .await
@@ -58,7 +61,12 @@ async fn main() -> Result<()> {
     }
 
     let snap = Arc::new(Snapshot::new(cfg));
-    let edge = Edge::with_tls(snap.clone(), tls.clone());
+    let edge = Edge::with_tls_and_geo(snap.clone(), tls.clone(), geo);
+    if let Some(geo) = &edge.geo {
+        for (which, kind) in geo.describe() {
+            info!("geoip {which}: {kind}");
+        }
+    }
     info!("pipeline: {}", edge.stage_names().join(" -> "));
 
     /* before any listener is up, so a signal arriving during startup is still heard */

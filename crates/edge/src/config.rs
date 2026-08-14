@@ -37,11 +37,28 @@ pub struct Config {
     /// Where to get certificates automatically. None means every certificate is somebody
     /// else's problem, which is the default.
     pub acme: Option<AcmeConfig>,
+    /// Databases for `ip.geoip.country` and `ip.geoip.asnum`. Empty means those fields
+    /// are refused at config load rather than silently never matching.
+    pub geoip: GeoipConfig,
     /// How this node reports itself to the control plane. Only the timing lives here -
     /// *which* node this is comes from the environment, because one config revision is
     /// shared by the whole fleet. See `fleet`.
     pub fleet: FleetConfig,
     pub zones: Vec<Zone>,
+}
+
+/// Where the geo databases are. Node-wide: which country an address is in cannot differ
+/// per hostname.
+#[derive(Debug, Clone, Default)]
+pub struct GeoipConfig {
+    pub country: Option<PathBuf>,
+    pub asn: Option<PathBuf>,
+}
+
+impl GeoipConfig {
+    pub fn is_configured(&self) -> bool {
+        self.country.is_some() || self.asn.is_some()
+    }
 }
 
 /// Heartbeat timing. Node-wide, and only meaningful with a `control_plane` set.
@@ -368,8 +385,33 @@ pub fn parse(text: &str) -> Result<Config> {
         }),
         acme: acme_from(raw.acme, &zones)?,
         fleet: fleet_from(raw.fleet)?,
+        geoip: geoip_from(raw.geoip, &zones)?,
         zones,
     })
+}
+
+fn geoip_from(raw: Option<raw::Geoip>, zones: &[Zone]) -> Result<GeoipConfig> {
+    let cfg = match raw {
+        Some(raw) => GeoipConfig {
+            country: raw.country.map(PathBuf::from),
+            asn: raw.asn.map(PathBuf::from),
+        },
+        None => GeoipConfig::default(),
+    };
+
+    /* a rule asking where an address is, on a node with nothing to ask, is a config that
+       looks like it works and quietly never matches - the same trap as a zone wanting acme
+       with no acme server named. refuse it here, where somebody is looking */
+    if !cfg.is_configured() {
+        if let Some(zone) = zones.iter().find(|z| z.waf.rules.needs_geoip()) {
+            bail!(
+                "zone `{}` has a rule using ip.geoip, but no top-level `geoip` block names \
+                 a database - such a rule would never match anything",
+                zone.name
+            );
+        }
+    }
+    Ok(cfg)
 }
 
 fn fleet_from(raw: raw::Fleet) -> Result<FleetConfig> {
@@ -766,7 +808,20 @@ mod raw {
         pub acme: Option<Acme>,
         #[serde(default)]
         pub fleet: Fleet,
+        #[serde(default)]
+        pub geoip: Option<Geoip>,
         pub zones: Vec<Zone>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Geoip {
+        /// A country database, e.g. GeoLite2-Country.mmdb.
+        #[serde(default)]
+        pub country: Option<String>,
+        /// An ASN database, e.g. GeoLite2-ASN.mmdb.
+        #[serde(default)]
+        pub asn: Option<String>,
     }
 
     #[derive(Deserialize)]
@@ -1317,6 +1372,47 @@ mod tests {
     /// The example config that ships with the repo, embedded at compile time so this
     /// does not depend on the working directory.
     const SHIPPED_EXAMPLE: &str = include_str!("../../../cloudflint.yaml");
+
+    #[test]
+    fn a_geoip_rule_without_a_database_is_refused_at_config_load() {
+        /* it would parse, compile, and then never match anything - the worst outcome for
+           a security rule, because it looks like it is working */
+        let yaml = "zones:\n  - name: demo\n    hostnames: [\"demo.local\"]\n    origin:\n      \
+                    url: \"http://127.0.0.1:9\"\n    waf:\n      rulesets: []\n      rules:\n        \
+                    - id: block-somewhere\n          action: block\n          expression: >-\n            \
+                    ip.geoip.country eq \"CN\"\n";
+        let e = match parse(yaml) {
+            Err(e) => format!("{e:#}"),
+            Ok(_) => panic!("a geoip rule with no database should be refused"),
+        };
+        assert!(e.contains("geoip"), "unhelpful error: {e}");
+        assert!(e.contains("never match"), "unhelpful error: {e}");
+    }
+
+    #[test]
+    fn the_same_rule_is_accepted_once_a_database_is_named() {
+        let yaml = "geoip:\n  country: \"GeoLite2-Country.mmdb\"\nzones:\n  - name: demo\n    \
+                    hostnames: [\"demo.local\"]\n    origin:\n      url: \"http://127.0.0.1:9\"\n    \
+                    waf:\n      rulesets: []\n      rules:\n        - id: block-somewhere\n          \
+                    action: block\n          expression: >-\n            ip.geoip.country eq \"CN\"\n";
+        let cfg = parse(yaml).expect("naming a database should be enough");
+        assert!(cfg.geoip.is_configured());
+        /* the path is not opened here - the control plane validates config for files it
+           does not have. `Geo::load` is what fails on a missing file, at startup */
+        assert_eq!(
+            cfg.geoip.country.as_deref(),
+            Some(std::path::Path::new("GeoLite2-Country.mmdb"))
+        );
+    }
+
+    #[test]
+    fn asn_rules_need_a_database_too() {
+        let yaml = "zones:\n  - name: demo\n    hostnames: [\"demo.local\"]\n    origin:\n      \
+                    url: \"http://127.0.0.1:9\"\n    waf:\n      rulesets: []\n      rules:\n        \
+                    - id: block-asn\n          action: block\n          expression: >-\n            \
+                    ip.geoip.asnum eq \"64512\"\n";
+        assert!(parse(yaml).is_err());
+    }
 
     #[test]
     fn the_example_config_in_the_repo_still_parses() {

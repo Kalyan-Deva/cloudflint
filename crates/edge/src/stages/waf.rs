@@ -122,7 +122,7 @@ fn scan(
     };
     /* ctx.client, which is the peer unless a *trusted* proxy said otherwise. Reading
        X-Forwarded-For from anyone would let a client pick its own `ip.src` */
-    let decoded = Decoded::new(req, &ctx.host, ctx.client, ctx.tls);
+    let decoded = Decoded::new(req, &ctx.host, ctx.client, ctx.tls, &ctx.geo);
     Ok(ctx.zone.waf.rules.evaluate(&decoded.input(body), phase, log))
 }
 
