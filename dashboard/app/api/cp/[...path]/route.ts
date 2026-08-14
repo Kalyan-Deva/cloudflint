@@ -48,3 +48,9 @@ export async function PUT(req: Request, ctx: Ctx) {
 export async function POST(req: Request, ctx: Ctx) {
   return forward(req, (await ctx.params).path);
 }
+/* every verb the control plane accepts needs an export here: a method this file does not
+   name is a 405 from Next before the proxy is ever reached. revoking a token went nowhere
+   for exactly that reason */
+export async function DELETE(req: Request, ctx: Ctx) {
+  return forward(req, (await ctx.params).path);
+}
