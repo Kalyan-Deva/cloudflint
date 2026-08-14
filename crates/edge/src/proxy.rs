@@ -28,6 +28,8 @@ struct Outcome {
     zone: String,
     /// The peer, unless a trusted proxy told us otherwise - see `client_ip`.
     client: IpAddr,
+    /// Where that client is, when a database is loaded.
+    geo: crate::geoip::Located,
 }
 
 pub async fn handle(
@@ -88,6 +90,8 @@ pub async fn handle(
         decided_by: outcome.decided_by.to_string(),
         cache,
         client_ip: outcome.client.to_string(),
+        country: outcome.geo.country.clone(),
+        asn: outcome.geo.asn,
     });
 
     /* the client first, since that is the one somebody will search for; the peer only
@@ -144,6 +148,7 @@ async fn route(
             decided_by: "route",
             zone: String::new(),
             client,
+            geo,
         };
     };
     let Some(zone) = cfg.zone_for(&host) else {
@@ -152,6 +157,7 @@ async fn route(
             decided_by: "route",
             zone: String::new(),
             client,
+            geo,
         };
     };
 
@@ -180,6 +186,7 @@ async fn route(
         decided_by: ctx.decided_by,
         zone: zone.name.clone(),
         client,
+        geo: ctx.geo.clone(),
     }
 }
 

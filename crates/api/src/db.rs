@@ -36,7 +36,9 @@ CREATE TABLE IF NOT EXISTS events (
     duration_us INTEGER NOT NULL,
     decided_by  TEXT    NOT NULL,
     cache       TEXT,
-    client_ip   TEXT    NOT NULL
+    client_ip   TEXT    NOT NULL,
+    country     TEXT,
+    asn         INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS tokens (
@@ -109,6 +111,10 @@ pub struct Summary {
     pub by_stage: Vec<(String, u64)>,
     pub top_paths: Vec<(String, u64)>,
     pub top_ips: Vec<(String, u64)>,
+    /// Empty when no edge has a geo database - the panels then have nothing to draw,
+    /// which is the honest answer rather than a chart of "unknown".
+    pub top_countries: Vec<(String, u64)>,
+    pub top_asns: Vec<(String, u64)>,
 }
 
 /// One bucket of the traffic chart.
@@ -183,6 +189,11 @@ impl Db {
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
             .ok();
         conn.execute_batch(SCHEMA).context("creating schema")?;
+        /* CREATE TABLE IF NOT EXISTS does nothing to a table that already exists, so a
+           database from before these columns needs them added rather than assumed */
+        for (column, kind) in [("country", "TEXT"), ("asn", "INTEGER")] {
+            add_column(&conn, "events", column, kind)?;
+        }
 
         Ok(Db {
             conn: Arc::new(Mutex::new(conn)),
@@ -556,8 +567,9 @@ impl Db {
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO events
-                 (at_ms, zone, host, method, path, status, duration_us, decided_by, cache, client_ip)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                 (at_ms, zone, host, method, path, status, duration_us, decided_by, cache,
+                  client_ip, country, asn)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             )?;
             for e in events {
                 stmt.execute(params![
@@ -571,6 +583,8 @@ impl Db {
                     e.decided_by,
                     e.cache,
                     e.client_ip,
+                    e.country,
+                    e.asn,
                 ])?;
             }
         }
@@ -635,6 +649,10 @@ impl Db {
         )?;
         summary.top_paths = group(&conn, "path", since_ms, all_zones, zone_filter, 10)?;
         summary.top_ips = group(&conn, "client_ip", since_ms, all_zones, zone_filter, 10)?;
+        /* NULL rows are dropped rather than bucketed as "unknown": a request nobody could
+           place is not a country, and showing it as one would put it top of the chart */
+        summary.top_countries = group(&conn, "country", since_ms, all_zones, zone_filter, 15)?;
+        summary.top_asns = group(&conn, "asn", since_ms, all_zones, zone_filter, 15)?;
 
         Ok(summary)
     }
@@ -757,6 +775,24 @@ pub fn newest_version(versions: impl IntoIterator<Item = String>) -> String {
     })
 }
 
+/// Add a column to an existing table, if it is not already there.
+///
+/// SQLite has no `ADD COLUMN IF NOT EXISTS`, and re-adding one is an error rather than a
+/// no-op, so the table is asked what it has first. This is the whole migration story: the
+/// events table is append-only history, and every added column is nullable.
+fn add_column(conn: &Connection, table: &str, column: &str, kind: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let existing: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<_>>()?;
+
+    if !existing.iter().any(|c| c == column) {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"), [])
+            .with_context(|| format!("adding {table}.{column}"))?;
+    }
+    Ok(())
+}
+
 /// Nearest-rank percentile. Exact rather than estimated, which is affordable at the
 /// volumes a single node produces and avoids explaining a sketch to anyone.
 fn percentile(
@@ -789,8 +825,8 @@ fn group(
 ) -> Result<Vec<(String, u64)>> {
     /* the column name is ours, never a caller's - values still go through params */
     let sql = format!(
-        "SELECT {column}, COUNT(*) AS n FROM events
-         WHERE at_ms >= ?1 AND (?2 OR zone = ?3)
+        "SELECT CAST({column} AS TEXT), COUNT(*) AS n FROM events
+         WHERE at_ms >= ?1 AND (?2 OR zone = ?3) AND {column} IS NOT NULL
          GROUP BY {column} ORDER BY n DESC LIMIT ?4"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -1020,6 +1056,99 @@ mod tests {
         beat.active_revision = 5;
         db.record_heartbeat(&beat, 12_000).unwrap();
         assert_eq!(db.edges(Some(5), 45, 12_000).unwrap()[0].acked_at_ms, Some(12_000));
+    }
+
+    #[test]
+    fn a_database_from_before_the_geo_columns_gets_them_added() {
+        /* the case CREATE TABLE IF NOT EXISTS silently does nothing for: a real deployment
+           whose events table predates these columns. without the migration every insert
+           would fail with "table events has no column named country" */
+        let path = std::env::temp_dir().join(format!(
+            "cloudflint-migrate-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        {
+            /* the old schema, exactly as it was before geo */
+            let old = Connection::open(&path).unwrap();
+            old.execute_batch(
+                "CREATE TABLE events (
+                     at_ms INTEGER NOT NULL, zone TEXT NOT NULL, host TEXT NOT NULL,
+                     method TEXT NOT NULL, path TEXT NOT NULL, status INTEGER NOT NULL,
+                     duration_us INTEGER NOT NULL, decided_by TEXT NOT NULL, cache TEXT,
+                     client_ip TEXT NOT NULL
+                 );
+                 INSERT INTO events VALUES (1000,'demo','demo.local','GET','/',200,10,'origin',NULL,'1.2.3.4');",
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(path.to_str().unwrap()).expect("an older database should migrate");
+
+        /* the old row survived, and a new one with geo goes in */
+        db.insert_events(&[Event {
+            at_ms: 2000,
+            zone: "demo".into(),
+            host: "demo.local".into(),
+            method: "GET".into(),
+            path: "/".into(),
+            status: 200,
+            duration_us: 20,
+            decided_by: "origin".into(),
+            cache: None,
+            client_ip: "5.6.7.8".into(),
+            country: Some("GB".into()),
+            asn: Some(64512),
+        }])
+        .expect("inserting with geo should work after the migration");
+
+        let summary = db.summary(None, 0).unwrap();
+        assert_eq!(summary.requests, 2, "the pre-migration row is still there");
+        /* only the new row has a country, and the old NULL is not a bucket */
+        assert_eq!(summary.top_countries, vec![("GB".to_string(), 1)]);
+        assert_eq!(summary.top_asns, vec![("64512".to_string(), 1)]);
+
+        /* and opening it twice does not try to add the columns again */
+        drop(db);
+        assert!(Db::open(path.to_str().unwrap()).is_ok(), "reopening should be a no-op");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn requests_nobody_could_place_are_left_out_rather_than_bucketed() {
+        let db = Db::open(":memory:").unwrap();
+        let plain = |ip: &str, country: Option<&str>| Event {
+            at_ms: 1000,
+            zone: "demo".into(),
+            host: "demo.local".into(),
+            method: "GET".into(),
+            path: "/".into(),
+            status: 200,
+            duration_us: 10,
+            decided_by: "origin".into(),
+            cache: None,
+            client_ip: ip.into(),
+            country: country.map(str::to_owned),
+            asn: None,
+        };
+        db.insert_events(&[
+            plain("1.1.1.1", Some("GB")),
+            plain("2.2.2.2", None),
+            plain("3.3.3.3", None),
+        ])
+        .unwrap();
+
+        let summary = db.summary(None, 0).unwrap();
+        assert_eq!(summary.requests, 3);
+        /* two of three had no country, and they must not out-rank the one that did */
+        assert_eq!(summary.top_countries, vec![("GB".to_string(), 1)]);
+        assert!(summary.top_asns.is_empty(), "no asns were reported at all");
     }
 
     #[test]

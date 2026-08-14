@@ -38,6 +38,13 @@ pub struct Event {
     /// HIT / MISS / STALE / BYPASS, when the cache had an opinion.
     pub cache: Option<String>,
     pub client_ip: String,
+    /// Where the client is, when a geo database is loaded. Absent otherwise - and stored
+    /// as absent rather than as "unknown", so a database added later does not leave a
+    /// bucket of fake countries behind it.
+    #[serde(default)]
+    pub country: Option<String>,
+    #[serde(default)]
+    pub asn: Option<u32>,
 }
 
 pub fn now_ms() -> u64 {
@@ -188,6 +195,8 @@ mod tests {
             decided_by: "origin".into(),
             cache: Some("MISS".into()),
             client_ip: "203.0.113.9".into(),
+            country: Some("GB".into()),
+            asn: Some(64512),
         }
     }
 
