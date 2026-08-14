@@ -355,25 +355,13 @@ impl Db {
              FROM edges ORDER BY last_seen_ms DESC",
         )?;
 
+        /* built without a status first: "outdated" is relative to the newest version
+           anywhere in the fleet, which is not knowable while still reading rows */
         let rows = stmt.query_map([], |row| {
             let last_seen_ms: i64 = row.get(6)?;
             let started_at_ms: i64 = row.get(4)?;
             let active_revision: i64 = row.get(7)?;
-            let draining: bool = row.get::<_, i64>(9)? == 1;
-            let origins_total: i64 = row.get(19)?;
-            let origins_healthy: i64 = row.get(20)?;
             let certificates: String = row.get(21)?;
-
-            let last_seen_age_s = (now - last_seen_ms).max(0) / 1000;
-            let (status, note) = status_of(
-                last_seen_age_s,
-                offline_after_s,
-                draining,
-                desired_revision,
-                active_revision,
-                origins_total,
-                origins_healthy,
-            );
 
             Ok(EdgeView {
                 edge_id: row.get(0)?,
@@ -383,7 +371,7 @@ impl Db {
                 started_at_ms,
                 first_seen_ms: row.get(5)?,
                 last_seen_ms,
-                last_seen_age_s,
+                last_seen_age_s: (now - last_seen_ms).max(0) / 1000,
                 uptime_s: match started_at_ms > 0 {
                     true => (last_seen_ms - started_at_ms).max(0) / 1000,
                     false => 0,
@@ -394,9 +382,10 @@ impl Db {
                     Some(want) => active_revision == want,
                     None => true,
                 },
-                draining,
-                status,
-                note,
+                draining: row.get::<_, i64>(9)? == 1,
+                /* filled in below, once the whole fleet is in hand */
+                status: "healthy",
+                note: None,
                 cpu_percent: row.get(10)?,
                 memory_bytes: row.get(11)?,
                 memory_total_bytes: row.get(12)?,
@@ -406,15 +395,41 @@ impl Db {
                 cache_entries: row.get(16)?,
                 cache_bytes: row.get(17)?,
                 zones: row.get(18)?,
-                origins_total,
-                origins_healthy,
+                origins_total: row.get(19)?,
+                origins_healthy: row.get(20)?,
                 /* stored as text because sqlite has no json type worth using; parsed
                    back here so the dashboard gets structure rather than a string */
                 certificates: serde_json::from_str(&certificates)
                     .unwrap_or(serde_json::Value::Array(vec![])),
             })
         })?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let mut edges = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+
+        /* an offline node's version is stale news and should not hold the fleet's
+           "newest" back - otherwise one forgotten box makes every live node look current */
+        let newest = newest_version(
+            edges
+                .iter()
+                .filter(|e| e.last_seen_age_s <= offline_after_s)
+                .map(|e| e.version.clone()),
+        );
+
+        for edge in &mut edges {
+            let (status, note) = status_of(&Judgement {
+                last_seen_age_s: edge.last_seen_age_s,
+                offline_after_s,
+                draining: edge.draining,
+                desired_revision,
+                active_revision: edge.active_revision,
+                origins_total: edge.origins_total,
+                origins_healthy: edge.origins_healthy,
+                version: &edge.version,
+                newest_version: &newest,
+            });
+            edge.status = status;
+            edge.note = note;
+        }
+        Ok(edges)
     }
 
     /// Forget a node. For one that has been decommissioned - otherwise it sits in the
@@ -625,6 +640,22 @@ impl Db {
     }
 }
 
+/// Everything a node's status is derived from. A struct rather than nine arguments,
+/// which is the point at which a signature stops being readable.
+pub struct Judgement<'a> {
+    pub last_seen_age_s: i64,
+    pub offline_after_s: i64,
+    pub draining: bool,
+    pub desired_revision: Option<i64>,
+    pub active_revision: i64,
+    pub origins_total: i64,
+    pub origins_healthy: i64,
+    pub version: &'a str,
+    /// The newest version anywhere in the fleet. A node behind it is `outdated` - which
+    /// is only knowable by looking at every node, so it cannot be decided per row.
+    pub newest_version: &'a str,
+}
+
 /// What to call a node, and why.
 ///
 /// Derived on every read rather than stored, because the interesting state is *silence*
@@ -632,29 +663,26 @@ impl Db {
 /// whatever status it last wrote, forever, which is precisely the case this has to get
 /// right.
 ///
-/// Order matters: offline beats everything, because nothing else can be known about a
-/// node that isn't talking. Draining is next - it is deliberate, so reporting it as
-/// unhealthy would cry wolf during every deploy.
-#[allow(clippy::too_many_arguments)]
-fn status_of(
-    last_seen_age_s: i64,
-    offline_after_s: i64,
-    draining: bool,
-    desired_revision: Option<i64>,
-    active_revision: i64,
-    origins_total: i64,
-    origins_healthy: i64,
-) -> (&'static str, Option<String>) {
-    if last_seen_age_s > offline_after_s {
+/// Order is the whole design, worst first:
+///
+/// - `offline` beats everything: nothing else can be known about a node that isn't talking.
+/// - `degraded` is next and covers the two states that are about *this node's* health -
+///   draining, and origins it cannot reach. Draining outranks config because a node on its
+///   way out is expected to stop taking config, and reporting that as a rollout failure
+///   would cry wolf on every deploy.
+/// - `config_mismatch` before `outdated`: running the wrong rules is a security question,
+///   running an old build is a maintenance one.
+fn status_of(j: &Judgement) -> (&'static str, Option<String>) {
+    if j.last_seen_age_s > j.offline_after_s {
         return (
             "offline",
-            Some(format!("no heartbeat for {last_seen_age_s}s")),
+            Some(format!("no heartbeat for {}s", j.last_seen_age_s)),
         );
     }
-    if draining {
+    if j.draining {
         return ("degraded", Some("draining, on its way out".into()));
     }
-    if origins_total > 0 && origins_healthy == 0 {
+    if j.origins_total > 0 && j.origins_healthy == 0 {
         return (
             "degraded",
             Some("every origin is unhealthy on this node".into()),
@@ -662,23 +690,71 @@ fn status_of(
     }
 
     /* -1 means this node follows a local file, so there is no revision to be behind */
-    if let Some(want) = desired_revision {
-        if active_revision != want && active_revision != cloudflint_edge::fleet::NO_REVISION {
+    if let Some(want) = j.desired_revision {
+        if j.active_revision != want && j.active_revision != cloudflint_edge::fleet::NO_REVISION {
             return (
-                "degraded",
+                "config_mismatch",
                 Some(format!(
-                    "on config revision {active_revision}, fleet is on {want}"
+                    "on config revision {}, fleet is on {want}",
+                    j.active_revision
                 )),
             );
         }
     }
-    if origins_total > 0 && origins_healthy < origins_total {
+    if is_older(j.version, j.newest_version) {
         return (
-            "degraded",
-            Some(format!("{origins_healthy} of {origins_total} origins healthy")),
+            "outdated",
+            Some(format!(
+                "running {}, the fleet has {}",
+                j.version, j.newest_version
+            )),
         );
     }
-    ("online", None)
+    if j.origins_total > 0 && j.origins_healthy < j.origins_total {
+        return (
+            "degraded",
+            Some(format!(
+                "{} of {} origins healthy",
+                j.origins_healthy, j.origins_total
+            )),
+        );
+    }
+    ("healthy", None)
+}
+
+/// Compare two dotted version strings numerically, component by component.
+///
+/// String order is wrong for versions the moment a number reaches double digits - "0.10.0"
+/// sorts before "0.9.0" - and this decides whether a node is called outdated, so getting
+/// it wrong would flag a freshly deployed node as stale. Anything non-numeric (a `-rc1`
+/// suffix, an empty string from a node too old to report one) compares as 0, which keeps
+/// it from ever being called *newer* than a release.
+fn is_older(version: &str, newest: &str) -> bool {
+    let parts = |v: &str| -> Vec<u64> {
+        v.split(['.', '-', '+'])
+            .map(|p| p.parse::<u64>().unwrap_or(0))
+            .collect()
+    };
+    let (a, b) = (parts(version), parts(newest));
+    let len = a.len().max(b.len());
+
+    for i in 0..len {
+        let (x, y) = (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0));
+        if x != y {
+            return x < y;
+        }
+    }
+    false
+}
+
+/// The newest version any node reports, which is what the others are measured against.
+pub fn newest_version(versions: impl IntoIterator<Item = String>) -> String {
+    versions.into_iter().fold(String::new(), |best, v| {
+        match is_older(&best, &v) {
+            true => v,
+            false => best,
+        }
+    })
 }
 
 /// Nearest-rank percentile. Exact rather than estimated, which is affordable at the
@@ -729,25 +805,35 @@ mod tests {
     use super::*;
 
     /// A node that has just reported in, healthy and on the right config.
-    fn healthy() -> (i64, i64, bool, Option<i64>, i64, i64, i64) {
-        (2, 45, false, Some(7), 7, 2, 2)
+    fn healthy() -> Judgement<'static> {
+        Judgement {
+            last_seen_age_s: 2,
+            offline_after_s: 45,
+            draining: false,
+            desired_revision: Some(7),
+            active_revision: 7,
+            origins_total: 2,
+            origins_healthy: 2,
+            version: "1.2.3",
+            newest_version: "1.2.3",
+        }
     }
 
-    fn call(args: (i64, i64, bool, Option<i64>, i64, i64, i64)) -> (&'static str, Option<String>) {
-        status_of(args.0, args.1, args.2, args.3, args.4, args.5, args.6)
+    fn call(j: Judgement) -> (&'static str, Option<String>) {
+        status_of(&j)
     }
 
     #[test]
-    fn a_node_reporting_in_and_keeping_up_is_online() {
+    fn a_node_reporting_in_and_keeping_up_is_healthy() {
         let (status, note) = call(healthy());
-        assert_eq!(status, "online");
-        assert!(note.is_none(), "online needs no explanation");
+        assert_eq!(status, "healthy");
+        assert!(note.is_none(), "healthy needs no explanation");
     }
 
     #[test]
     fn silence_past_the_deadline_is_offline() {
         let mut args = healthy();
-        args.0 = 46;
+        args.last_seen_age_s = 46;
         let (status, note) = call(args);
         assert_eq!(status, "offline");
         assert!(note.unwrap().contains("46s"));
@@ -758,8 +844,8 @@ mod tests {
         /* the threshold is three intervals precisely so a single lost packet or a busy
            moment does not take a node out of the fleet */
         let mut args = healthy();
-        args.0 = 45;
-        assert_eq!(call(args).0, "online");
+        args.last_seen_age_s = 45;
+        assert_eq!(call(args).0, "healthy");
     }
 
     #[test]
@@ -767,10 +853,11 @@ mod tests {
         /* nothing else can be known about a node that is not talking, so a stale
            report of being behind or draining must not outrank the silence */
         let mut args = healthy();
-        args.0 = 600;
-        args.2 = true;
-        args.4 = 1;
-        args.6 = 0;
+        args.last_seen_age_s = 600;
+        args.draining = true;
+        args.active_revision = 1;
+        args.origins_healthy = 0;
+        args.version = "0.9.0";
         assert_eq!(call(args).0, "offline");
     }
 
@@ -779,8 +866,8 @@ mod tests {
         /* a node on its way out is expected to stop taking config; reporting that as a
            rollout failure would cry wolf on every deploy */
         let mut args = healthy();
-        args.2 = true;
-        args.4 = 1;
+        args.draining = true;
+        args.active_revision = 1;
         let (status, note) = call(args);
         assert_eq!(status, "degraded");
         assert!(note.unwrap().contains("draining"));
@@ -789,17 +876,17 @@ mod tests {
     #[test]
     fn every_origin_down_outranks_being_behind() {
         let mut args = healthy();
-        args.4 = 1;
-        args.6 = 0;
+        args.active_revision = 1;
+        args.origins_healthy = 0;
         assert!(call(args).1.unwrap().contains("every origin"));
     }
 
     #[test]
-    fn being_behind_on_config_is_degraded() {
+    fn being_behind_on_config_is_its_own_state() {
         let mut args = healthy();
-        args.4 = 5;
+        args.active_revision = 5;
         let (status, note) = call(args);
-        assert_eq!(status, "degraded");
+        assert_eq!(status, "config_mismatch");
         let note = note.unwrap();
         assert!(note.contains('5') && note.contains('7'), "note was {note}");
     }
@@ -807,22 +894,51 @@ mod tests {
     #[test]
     fn a_node_on_a_local_file_is_never_behind() {
         let mut args = healthy();
-        args.4 = cloudflint_edge::fleet::NO_REVISION;
-        assert_eq!(call(args).0, "online");
+        args.active_revision = cloudflint_edge::fleet::NO_REVISION;
+        assert_eq!(call(args).0, "healthy");
     }
 
     #[test]
     fn no_desired_revision_means_nothing_to_compare() {
         let mut args = healthy();
-        args.3 = None;
-        args.4 = 3;
-        assert_eq!(call(args).0, "online");
+        args.desired_revision = None;
+        args.active_revision = 3;
+        assert_eq!(call(args).0, "healthy");
+    }
+
+    #[test]
+    fn an_old_build_is_outdated() {
+        let mut args = healthy();
+        args.version = "1.2.2";
+        let (status, note) = call(args);
+        assert_eq!(status, "outdated");
+        let note = note.unwrap();
+        assert!(note.contains("1.2.2") && note.contains("1.2.3"), "note was {note}");
+    }
+
+    #[test]
+    fn the_wrong_config_matters_more_than_an_old_build() {
+        /* running the wrong rules is a security question; running an old binary is a
+           maintenance one, and a node doing both should say the more serious thing */
+        let mut args = healthy();
+        args.version = "1.0.0";
+        args.active_revision = 5;
+        assert_eq!(call(args).0, "config_mismatch");
+    }
+
+    #[test]
+    fn a_node_ahead_of_the_fleet_is_not_outdated() {
+        /* mid-deploy the first upgraded node is newer than "newest" was a moment ago */
+        let mut args = healthy();
+        args.version = "2.0.0";
+        args.newest_version = "1.2.3";
+        assert_eq!(call(args).0, "healthy");
     }
 
     #[test]
     fn some_origins_down_is_degraded_but_lower_priority() {
         let mut args = healthy();
-        args.6 = 1;
+        args.origins_healthy = 1;
         let (status, note) = call(args);
         assert_eq!(status, "degraded");
         assert!(note.unwrap().contains("1 of 2"));
@@ -833,9 +949,36 @@ mod tests {
         /* zero of zero healthy is a node with no zones, not a broken one - the guard
            on origins_total is what keeps this from reading as an outage */
         let mut args = healthy();
-        args.5 = 0;
-        args.6 = 0;
-        assert_eq!(call(args).0, "online");
+        args.origins_total = 0;
+        args.origins_healthy = 0;
+        assert_eq!(call(args).0, "healthy");
+    }
+
+    #[test]
+    fn versions_compare_as_numbers_not_as_text() {
+        /* the bug this exists to prevent: "0.10.0" sorts before "0.9.0" as a string,
+           which would call a freshly deployed node outdated */
+        assert!(is_older("0.9.0", "0.10.0"));
+        assert!(!is_older("0.10.0", "0.9.0"));
+        assert!(is_older("1.2.3", "1.2.10"));
+        assert!(!is_older("1.2.3", "1.2.3"));
+        assert!(is_older("1.2", "1.2.1"), "a missing component counts as zero");
+        assert!(!is_older("1.2.0", "1.2"));
+    }
+
+    #[test]
+    fn an_unparseable_version_is_never_called_newer() {
+        /* a node too old to report one, or a build with a suffix we do not understand */
+        assert!(is_older("", "1.0.0"));
+        assert!(!is_older("1.0.0", ""));
+        assert!(is_older("1.0.0-rc1", "1.0.1"));
+    }
+
+    #[test]
+    fn the_newest_version_is_the_highest_anyone_reports() {
+        let versions = ["1.2.3", "0.9.0", "1.10.0", "1.2.10"].map(String::from);
+        assert_eq!(newest_version(versions), "1.10.0");
+        assert_eq!(newest_version(Vec::new()), "");
     }
 
     #[test]

@@ -321,11 +321,24 @@ serving, CPU and memory, active connections, requests per second, cache size, or
 health and per-zone certificate status. The reply names the revision the fleet is meant to
 be on, which is how a rollout is acknowledged.
 
-`GET /v1/edges` derives each node's state rather than storing it: `offline` after 45
-seconds of silence, `degraded` while draining, behind on config, or with unhealthy
-origins, and `online` otherwise. Nodes are listed in the dashboard's **Fleet** page, with
-counts per region. A node that has been decommissioned can be forgotten with
-`DELETE /v1/edges/{id}`; one that is merely unreachable reappears on its next heartbeat.
+`GET /v1/edges` derives each node's state rather than storing it, worst first:
+
+| State | Means |
+|---|---|
+| `offline` | no heartbeat for 45 seconds — three missed beats, not one |
+| `degraded` | draining, or origins it cannot reach |
+| `config_mismatch` | serving a config revision other than the fleet's |
+| `outdated` | running an older build than the newest node in the fleet |
+| `healthy` | none of the above |
+
+`outdated` is the one state that is not a property of a single node: it exists only
+relative to the newest version anyone reports, and offline nodes are excluded from that
+comparison so a decommissioned box cannot make live nodes look current. Versions are
+compared component by component as numbers, so `0.10.0` is newer than `0.9.0`.
+
+Nodes are listed in the dashboard's **Fleet** page, with counts per region. A node that
+has been decommissioned can be forgotten with `DELETE /v1/edges/{id}`; one that is merely
+unreachable reappears on its next heartbeat.
 
 ### Behind a load balancer
 
@@ -478,8 +491,8 @@ A request that matched no zone is labelled `zone="unrouted"`. From the control p
 `cloudflint_api_purges_total{outcome}`, `cloudflint_api_heartbeats_total`,
 `cloudflint_api_uptime_seconds`, `cloudflint_api_edges_configured`,
 `cloudflint_api_active_revision`, `cloudflint_api_build_info`, plus the fleet:
-`cloudflint_fleet_edges{status}` (`online`/`degraded`/`offline`),
-`cloudflint_fleet_edges_up_to_date` and `cloudflint_fleet_requests_per_second`.
+`cloudflint_fleet_edges{status}` (`healthy`/`degraded`/`outdated`/`config_mismatch`/
+`offline`), `cloudflint_fleet_edges_up_to_date` and `cloudflint_fleet_requests_per_second`.
 
 ## Tests
 

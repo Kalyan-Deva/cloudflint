@@ -44,25 +44,37 @@ type Node = {
 type Fleet = {
   desired_revision: number | null;
   offline_after_s: number;
+  newest_version: string;
   counts: {
     total: number;
-    online: number;
+    healthy: number;
     degraded: number;
+    outdated: number;
+    config_mismatch: number;
     offline: number;
     up_to_date: number;
   };
-  regions: { region: string; total: number; online: number }[];
+  regions: { region: string; total: number; healthy: number }[];
   edges: Node[];
 };
 
 /* -1 is the edge saying it follows a local file rather than this control plane */
 const NO_REVISION = -1;
 
-const DOT: Record<string, string> = {
-  online: "bg-good",
-  degraded: "bg-warn",
-  offline: "bg-bad",
+/* the five states, worst last. `text` is what the node's own badge says; `dot` is the
+   colour, and config mismatch shares red with offline because running the wrong rules is
+   a security problem rather than an untidy one */
+const STATE: Record<string, { label: string; dot: string; text: string }> = {
+  healthy: { label: "Healthy", dot: "bg-good", text: "text-good" },
+  degraded: { label: "Degraded", dot: "bg-warn", text: "text-warn" },
+  outdated: { label: "Outdated", dot: "bg-warn", text: "text-warn" },
+  config_mismatch: { label: "Config mismatch", dot: "bg-bad", text: "text-bad" },
+  offline: { label: "Offline", dot: "bg-bad", text: "text-bad" },
 };
+
+function state(status: string) {
+  return STATE[status] ?? { label: status, dot: "bg-dim", text: "text-dim" };
+}
 
 export default function FleetPage() {
   const { data, error, reload } = useApi<Fleet>("/api/cp/v1/edges");
@@ -114,17 +126,28 @@ export default function FleetPage() {
           desired !== null ? <Tag>fleet config revision {desired}</Tag> : <Tag>no config yet</Tag>
         }
       >
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 px-4 py-3">
-          <Cell label="Nodes" value={counts?.total ?? 0} hint="known here" />
+        <div className="grid grid-cols-3 md:grid-cols-6 gap-4 px-4 py-3">
           <Cell
-            label="Online"
-            value={counts?.online ?? 0}
-            tone={counts && counts.online > 0 ? "good" : undefined}
+            label="Healthy"
+            value={counts?.healthy ?? 0}
+            hint={`of ${counts?.total ?? 0}`}
+            tone={counts && counts.healthy > 0 ? "good" : undefined}
           />
           <Cell
             label="Degraded"
             value={counts?.degraded ?? 0}
             tone={counts && counts.degraded > 0 ? "warn" : undefined}
+          />
+          <Cell
+            label="Outdated"
+            value={counts?.outdated ?? 0}
+            hint={data?.newest_version ? `newest ${data.newest_version}` : undefined}
+            tone={counts && counts.outdated > 0 ? "warn" : undefined}
+          />
+          <Cell
+            label="Config mismatch"
+            value={counts?.config_mismatch ?? 0}
+            tone={counts && counts.config_mismatch > 0 ? "bad" : undefined}
           />
           <Cell
             label="Offline"
@@ -176,9 +199,9 @@ export default function FleetPage() {
               <Cell
                 key={r.region}
                 label={r.region}
-                value={`${r.online} of ${r.total}`}
-                hint="online"
-                tone={r.online === 0 ? "bad" : r.online < r.total ? "warn" : "good"}
+                value={`${r.healthy} of ${r.total}`}
+                hint="healthy"
+                tone={r.healthy === 0 ? "bad" : r.healthy < r.total ? "warn" : "good"}
               />
             ))}
           </div>
@@ -236,25 +259,19 @@ function NodePanel({
           {n.region && <Tag>{n.region}</Tag>}
           <Tag>v{n.version}</Tag>
           <span
-            className={`inline-block w-1.5 h-1.5 rounded-full ${DOT[n.status] ?? "bg-dim"}`}
+            className={`inline-block w-1.5 h-1.5 rounded-full ${state(n.status).dot}`}
             title={n.status}
           />
-          <span
-            className={`text-[11px] ${
-              n.status === "online"
-                ? "text-good"
-                : n.status === "degraded"
-                  ? "text-warn"
-                  : "text-bad"
-            }`}
-          >
-            {n.status.toUpperCase()}
+          <span className={`text-[11px] uppercase ${state(n.status).text}`}>
+            {state(n.status).label}
           </span>
         </div>
       }
     >
       {n.note && (
-        <div className="px-4 py-2 border-b hair text-[12.5px] text-warn">{n.note}</div>
+        <div className={`px-4 py-2 border-b hair text-[12.5px] ${state(n.status).text}`}>
+          {n.note}
+        </div>
       )}
 
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4 px-4 py-3 border-b hair">

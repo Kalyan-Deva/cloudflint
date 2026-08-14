@@ -107,8 +107,10 @@ async fn metrics(State(api): State<Api>) -> impl IntoResponse {
         .edges(revision, OFFLINE_AFTER_S, now_ms())
         .ok()
         .map(|edges| crate::metrics::Fleet {
-            online: edges.iter().filter(|e| e.status == "online").count(),
+            healthy: edges.iter().filter(|e| e.status == "healthy").count(),
             degraded: edges.iter().filter(|e| e.status == "degraded").count(),
+            outdated: edges.iter().filter(|e| e.status == "outdated").count(),
+            config_mismatch: edges.iter().filter(|e| e.status == "config_mismatch").count(),
             offline: edges.iter().filter(|e| e.status == "offline").count(),
             up_to_date: edges.iter().filter(|e| e.up_to_date).count(),
             /* summed from what each node last said, not measured here - an offline node
@@ -442,18 +444,24 @@ async fn list_edges(State(api): State<Api>) -> ApiResult {
 
     /* counted here rather than in the browser so the numbers on the page and the
        numbers in a scrape come from the same place */
-    let online = edges.iter().filter(|e| e.status == "online").count();
-    let degraded = edges.iter().filter(|e| e.status == "degraded").count();
-    let offline = edges.iter().filter(|e| e.status == "offline").count();
+    let count = |status: &str| edges.iter().filter(|e| e.status == status).count();
 
     Ok(Json(json!({
         "desired_revision": desired,
         "offline_after_s": OFFLINE_AFTER_S,
+        "newest_version": crate::db::newest_version(
+            edges
+                .iter()
+                .filter(|e| e.status != "offline")
+                .map(|e| e.version.clone()),
+        ),
         "counts": {
             "total": edges.len(),
-            "online": online,
-            "degraded": degraded,
-            "offline": offline,
+            "healthy": count("healthy"),
+            "degraded": count("degraded"),
+            "outdated": count("outdated"),
+            "config_mismatch": count("config_mismatch"),
+            "offline": count("offline"),
             "up_to_date": edges.iter().filter(|e| e.up_to_date).count(),
         },
         "regions": regions_of(&edges),
@@ -464,21 +472,27 @@ async fn list_edges(State(api): State<Api>) -> ApiResult {
 
 /// Per region, because a fleet view that cannot tell you a whole POP is dark is not
 /// worth having.
+///
+/// "Healthy" here is the strict sense - a region whose nodes are all up but all running
+/// last week's config is not a region anybody should see a green number for.
 fn regions_of(edges: &[crate::db::EdgeView]) -> Vec<serde_json::Value> {
     let mut seen: Vec<(String, usize, usize)> = Vec::new();
     for edge in edges {
         let name = edge.region.clone().unwrap_or_else(|| "unlabelled".into());
+        let healthy = (edge.status == "healthy") as usize;
         match seen.iter_mut().find(|(r, _, _)| *r == name) {
-            Some((_, total, online)) => {
+            Some((_, total, ok)) => {
                 *total += 1;
-                *online += (edge.status == "online") as usize;
+                *ok += healthy;
             }
-            None => seen.push((name, 1, (edge.status == "online") as usize)),
+            None => seen.push((name, 1, healthy)),
         }
     }
     seen.sort_by(|a, b| a.0.cmp(&b.0));
     seen.into_iter()
-        .map(|(region, total, online)| json!({ "region": region, "total": total, "online": online }))
+        .map(|(region, total, healthy)| {
+            json!({ "region": region, "total": total, "healthy": healthy })
+        })
         .collect()
 }
 

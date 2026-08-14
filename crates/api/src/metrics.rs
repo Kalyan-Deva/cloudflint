@@ -13,8 +13,10 @@ use cloudflint_edge::metrics::{self, Counter};
 /// Fleet totals, read at scrape time like everything else that lives elsewhere.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Fleet {
-    pub online: usize,
+    pub healthy: usize,
     pub degraded: usize,
+    pub outdated: usize,
+    pub config_mismatch: usize,
     pub offline: usize,
     pub up_to_date: usize,
     pub requests_per_sec: f64,
@@ -76,8 +78,10 @@ impl ApiMetrics {
                 "Edges known to this control plane, by derived status.",
                 "status",
                 &[
-                    ("online", fleet.online as f64),
+                    ("healthy", fleet.healthy as f64),
                     ("degraded", fleet.degraded as f64),
+                    ("outdated", fleet.outdated as f64),
+                    ("config_mismatch", fleet.config_mismatch as f64),
                     ("offline", fleet.offline as f64),
                 ],
             );

@@ -317,7 +317,7 @@ async fn a_real_edge_registers_itself_and_acknowledges_a_rollout() {
     let node = &body["edges"][0];
     assert_eq!(node["edge_id"], "edge-under-test");
     assert_eq!(node["region"], "test-pop");
-    assert_eq!(node["status"], "online");
+    assert_eq!(node["status"], "healthy");
     assert_eq!(node["active_revision"], 1, "it should report the revision it pulled");
     assert_eq!(body["desired_revision"], 1);
     assert_eq!(node["zones"], 1);

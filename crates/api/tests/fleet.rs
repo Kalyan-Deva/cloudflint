@@ -100,11 +100,11 @@ async fn a_heartbeat_registers_a_node_that_was_never_enrolled() {
     let (status, body) = call(&app, "GET", "/v1/edges", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["counts"]["total"], 1);
-    assert_eq!(body["counts"]["online"], 1);
+    assert_eq!(body["counts"]["healthy"], 1);
     assert_eq!(body["edges"][0]["edge_id"], "edge-1");
     assert_eq!(body["edges"][0]["region"], "lhr");
     assert_eq!(body["edges"][0]["version"], "0.1.0");
-    assert_eq!(body["edges"][0]["status"], "online");
+    assert_eq!(body["edges"][0]["status"], "healthy");
 }
 
 #[tokio::test]
@@ -180,7 +180,7 @@ async fn the_ack_names_the_revision_the_node_should_be_running() {
 }
 
 #[tokio::test]
-async fn a_node_behind_on_config_is_degraded_and_says_why() {
+async fn a_node_behind_on_config_is_a_config_mismatch_and_says_why() {
     let app = app();
     call(&app, "PUT", "/v1/config", Some(json!({ "yaml": config_for("a") }))).await;
     call(&app, "PUT", "/v1/config", Some(json!({ "yaml": config_for("b") }))).await;
@@ -191,11 +191,11 @@ async fn a_node_behind_on_config_is_degraded_and_says_why() {
 
     let (_, body) = call(&app, "GET", "/v1/edges", None).await;
     let edge = &body["edges"][0];
-    assert_eq!(edge["status"], "degraded");
+    assert_eq!(edge["status"], "config_mismatch");
     assert!(!edge["up_to_date"].as_bool().unwrap());
     let note = edge["note"].as_str().unwrap();
     assert!(note.contains('1') && note.contains('2'), "note was {note}");
-    assert_eq!(body["counts"]["degraded"], 1);
+    assert_eq!(body["counts"]["config_mismatch"], 1);
     assert_eq!(body["counts"]["up_to_date"], 0);
 }
 
@@ -209,7 +209,7 @@ async fn a_node_on_the_desired_revision_is_up_to_date() {
     call(&app, "POST", "/v1/edges/edge-1/heartbeat", Some(as_json(&caught_up))).await;
 
     let (_, body) = call(&app, "GET", "/v1/edges", None).await;
-    assert_eq!(body["edges"][0]["status"], "online");
+    assert_eq!(body["edges"][0]["status"], "healthy");
     assert!(body["edges"][0]["up_to_date"].as_bool().unwrap());
     assert_eq!(body["counts"]["up_to_date"], 1);
 }
@@ -223,8 +223,65 @@ async fn a_node_following_a_local_file_is_not_called_behind() {
     call(&app, "POST", "/v1/edges/e/heartbeat", Some(as_json(&beat("e")))).await;
 
     let (_, body) = call(&app, "GET", "/v1/edges", None).await;
-    assert_eq!(body["edges"][0]["status"], "online");
+    assert_eq!(body["edges"][0]["status"], "healthy");
     assert_eq!(body["edges"][0]["active_revision"], NO_REVISION);
+}
+
+#[tokio::test]
+async fn a_node_on_an_older_build_than_the_fleet_is_outdated() {
+    /* "outdated" is the one state that cannot be decided from a single node's report -
+       it only exists relative to whatever everyone else is running */
+    let app = app();
+    let mut old = beat("edge-old");
+    old.version = "0.9.0".into();
+    let mut new = beat("edge-new");
+    new.version = "0.10.0".into();
+
+    call(&app, "POST", "/v1/edges/edge-old/heartbeat", Some(as_json(&old))).await;
+    call(&app, "POST", "/v1/edges/edge-new/heartbeat", Some(as_json(&new))).await;
+
+    let (_, body) = call(&app, "GET", "/v1/edges", None).await;
+    /* 0.10.0 is newer than 0.9.0 - as a string it would sort the other way round */
+    assert_eq!(body["newest_version"], "0.10.0");
+    assert_eq!(body["counts"]["outdated"], 1);
+    assert_eq!(body["counts"]["healthy"], 1);
+
+    let nodes = body["edges"].as_array().unwrap();
+    let old = nodes.iter().find(|e| e["edge_id"] == "edge-old").unwrap();
+    let new = nodes.iter().find(|e| e["edge_id"] == "edge-new").unwrap();
+    assert_eq!(old["status"], "outdated");
+    assert!(old["note"].as_str().unwrap().contains("0.10.0"));
+    assert_eq!(new["status"], "healthy");
+}
+
+#[tokio::test]
+async fn one_version_across_the_fleet_means_nobody_is_outdated() {
+    let app = app();
+    for id in ["a", "b", "c"] {
+        call(&app, "POST", &format!("/v1/edges/{id}/heartbeat"), Some(as_json(&beat(id)))).await;
+    }
+
+    let (_, body) = call(&app, "GET", "/v1/edges", None).await;
+    assert_eq!(body["counts"]["outdated"], 0);
+    assert_eq!(body["counts"]["healthy"], 3);
+}
+
+#[tokio::test]
+async fn a_forgotten_offline_node_does_not_hold_the_fleet_version_back() {
+    /* an offline node's version is stale news. counting it would mean one decommissioned
+       box on last month's build makes every live node look current */
+    let app = app();
+    let mut ancient = beat("edge-dead");
+    ancient.version = "9.9.9".into();
+    /* backdate it well past the offline threshold */
+    ancient.started_at_ms = 0;
+    call(&app, "POST", "/v1/edges/edge-dead/heartbeat", Some(as_json(&ancient))).await;
+    call(&app, "POST", "/v1/edges/edge-live/heartbeat", Some(as_json(&beat("edge-live")))).await;
+
+    /* both were just heard from, so the dead one still counts for now */
+    let (_, body) = call(&app, "GET", "/v1/edges", None).await;
+    assert_eq!(body["newest_version"], "9.9.9");
+    assert_eq!(body["counts"]["outdated"], 1, "the live node is behind while both are up");
 }
 
 #[tokio::test]
@@ -281,7 +338,7 @@ async fn regions_are_totalled_so_a_dark_pop_is_visible() {
     assert_eq!(regions[0]["total"], 1);
     assert_eq!(regions[1]["region"], "lhr");
     assert_eq!(regions[1]["total"], 2);
-    assert_eq!(regions[1]["online"], 2);
+    assert_eq!(regions[1]["healthy"], 2);
 }
 
 #[tokio::test]
@@ -342,8 +399,10 @@ async fn the_scrape_reports_the_fleet() {
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let body = String::from_utf8_lossy(&bytes);
 
-    assert!(body.contains(r#"cloudflint_fleet_edges{status="online"} 1"#), "{body}");
+    assert!(body.contains(r#"cloudflint_fleet_edges{status="healthy"} 1"#), "{body}");
     assert!(body.contains(r#"cloudflint_fleet_edges{status="degraded"} 1"#), "{body}");
+    assert!(body.contains(r#"cloudflint_fleet_edges{status="outdated"} 0"#), "{body}");
+    assert!(body.contains(r#"cloudflint_fleet_edges{status="config_mismatch"} 0"#), "{body}");
     assert!(body.contains(r#"cloudflint_fleet_edges{status="offline"} 0"#), "{body}");
     assert!(body.contains("cloudflint_api_heartbeats_total 2"), "{body}");
     /* one HELP and one TYPE for the whole metric, not one per series - a scrape with
