@@ -384,6 +384,8 @@ and a rule using them is refused at config load rather than never matching.
 geoip:
   country: "GeoLite2-Country.mmdb"
   asn: "GeoLite2-ASN.mmdb"
+  tor_exits: "tor-exit-nodes.txt"    # optional; the Tor Project publishes this
+  # hosting_keywords: [aws, hetzner] # optional; replaces the built-in list
 ```
 
 No database ships with Cloudflint — none of them can be redistributed. Any MaxMind DB file
@@ -392,8 +394,26 @@ MaxMind database. Both keys are optional; give whichever you have.
 
 ```
 ip.geoip.country in ["CN", "RU"]
+ip.geoip.continent eq "EU"
 ip.geoip.asnum eq "64512"
+ip.geoip.asorg contains "AMAZON"
+ip.src.is_hosting and http.request.headers["user-agent"] contains "Mozilla"
+not ip.src.is_anonymous
 ```
+
+`is_hosting`, `is_vpn`, `is_tor` and `is_anonymous` stand alone with no operator, the way
+`ssl` does. They are signals rather than facts, and they come from different places:
+
+- **Hosting and VPN are a keyword match** over the AS organisation name, so `AMAZON-02` and
+  `Amazon Data Services` both read as hosting. Whether an AS "is a hosting provider" is a
+  judgement that goes stale, so the built-in lists can be replaced with
+  `geoip.hosting_keywords` and `geoip.vpn_keywords`. A supplied list is used **instead of**
+  the defaults rather than as well — an operator overriding this wants their answer.
+- **Tor is not a judgement**, it is a published list. Point `geoip.tor_exits` at the Tor
+  Project's exit list and the answer is exact. Comments and blank lines are skipped, so the
+  file works as downloaded.
+- `is_anonymous` is `is_vpn or is_tor`. A cloud tenant is **not** anonymous — plenty of
+  legitimate traffic comes from datacenters, and conflating the two blocks a lot of it.
 
 The ASN is compared as the number written out, so `eq`, `in` and `matches` all work as they
 do everywhere else. An address the database cannot place matches **neither** `eq` nor `ne` —
@@ -429,7 +449,9 @@ there is a request to read a header from.
 http.request.method            http.request.uri          http.request.uri.path
 http.request.uri.query         http.request.body         http.host
 http.request.headers["name"]   ip.src                    ssl
-ip.geoip.country               ip.geoip.asnum
+ip.geoip.country               ip.geoip.continent        ip.geoip.asnum
+ip.geoip.asorg                 ip.src.is_hosting         ip.src.is_vpn
+ip.src.is_tor                  ip.src.is_anonymous
 ```
 
 Operators: `eq` `ne` `contains` `matches` `in`, combined with `and` `or` `not`.
