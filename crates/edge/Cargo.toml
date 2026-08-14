@@ -43,6 +43,9 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 x509-parser = "0.18.1"
+# cpu and memory for the fleet heartbeat. /proc on linux and the win32 process apis
+# are the alternative, and neither is worth hand-rolling twice for two numbers.
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 
 [dev-dependencies]
 

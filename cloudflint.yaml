@@ -36,6 +36,14 @@ limits:
   # this long. Kubernetes' own grace period is 30s, so match it or lower it.
   drain_timeout_secs: 30
 
+# Reporting in to the control plane, for the fleet view. A no-op without a
+# `control_plane` set. Only the timing lives here: which node this is comes from the
+# environment (CLOUDFLINT_EDGE_ID, CLOUDFLINT_REGION, CLOUDFLINT_EDGE_LABEL), because
+# one config revision is shared by every node in the fleet.
+fleet:
+  enabled: true
+  heartbeat_secs: 15
+
 # Automatic certificates. Leave this out and every certificate is one you installed.
 # A zone opts in with `acme: true` on its own tls block, below.
 # acme:

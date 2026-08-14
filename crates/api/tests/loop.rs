@@ -185,6 +185,7 @@ async fn the_edge_pulls_its_config_and_reports_back() {
         format!("http://{api_addr}"),
         snap.clone(),
         Duration::from_millis(50),
+        edge.revision.clone(),
     );
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -257,6 +258,79 @@ async fn the_edge_pulls_its_config_and_reports_back() {
 }
 
 #[tokio::test]
+async fn a_real_edge_registers_itself_and_acknowledges_a_rollout() {
+    /* the whole fleet loop with both halves running: the node reports in on its own,
+       the control plane learns of it without being told, and the revision it reports
+       is the one it actually took from the pull */
+    set_tokens();
+    std::env::set_var(cloudflint_edge::fleet::ID_VAR, "edge-under-test");
+    std::env::set_var(cloudflint_edge::fleet::REGION_VAR, "test-pop");
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    let origin = spawn_origin(hits.clone()).await;
+    let (api_addr, _db) = spawn_control_plane(vec![]).await;
+
+    api_call(
+        api_addr,
+        "PUT",
+        "/v1/config",
+        Some(json!({
+            "yaml": format!(
+                "control_plane: \"http://{api_addr}\"\nzones:\n  - name: demo\n    hostnames: [\"demo.local\"]\n    origin:\n      url: \"http://{origin}\"\n    waf:\n      rulesets: []\n"
+            )
+        })),
+    )
+    .await;
+
+    let bootstrap = format!(
+        "control_plane: \"http://{api_addr}\"\nzones:\n  - name: placeholder\n    hostnames: [\"nothing.local\"]\n    origin:\n      url: \"http://127.0.0.1:9\"\n"
+    );
+    let snap = Arc::new(Snapshot::new(config::parse(&bootstrap).unwrap()));
+    let edge = Edge::new(snap.clone());
+
+    snapshot::watch_remote(
+        format!("http://{api_addr}"),
+        snap.clone(),
+        Duration::from_millis(50),
+        edge.revision.clone(),
+    );
+    cloudflint_edge::fleet::spawn(
+        edge.clone(),
+        format!("http://{api_addr}"),
+        Duration::from_millis(50),
+        cloudflint_edge::fleet::Identity::from_env(),
+    );
+
+    let mut body = Value::Null;
+    let mut registered = false;
+    for _ in 0..200 {
+        let (_, seen) = api_call(api_addr, "GET", "/v1/edges", None).await;
+        if seen["counts"]["total"] == 1 && seen["edges"][0]["up_to_date"] == true {
+            body = seen;
+            registered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(registered, "the edge never registered or never caught up");
+
+    let node = &body["edges"][0];
+    assert_eq!(node["edge_id"], "edge-under-test");
+    assert_eq!(node["region"], "test-pop");
+    assert_eq!(node["status"], "online");
+    assert_eq!(node["active_revision"], 1, "it should report the revision it pulled");
+    assert_eq!(body["desired_revision"], 1);
+    assert_eq!(node["zones"], 1);
+    /* real numbers from a real process, so assert they are present and sane rather
+       than equal to anything in particular */
+    assert!(node["memory_bytes"].as_i64().unwrap() > 0, "no memory reported");
+    assert!(node["version"].as_str().unwrap().starts_with(char::is_numeric));
+
+    std::env::remove_var(cloudflint_edge::fleet::ID_VAR);
+    std::env::remove_var(cloudflint_edge::fleet::REGION_VAR);
+}
+
+#[tokio::test]
 async fn a_control_plane_that_goes_away_does_not_take_traffic_with_it() {
     set_tokens();
     let hits = Arc::new(AtomicUsize::new(0));
@@ -272,6 +346,7 @@ async fn a_control_plane_that_goes_away_does_not_take_traffic_with_it() {
         "http://127.0.0.1:9".to_string(),
         snap.clone(),
         Duration::from_millis(20),
+        edge.revision.clone(),
     );
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

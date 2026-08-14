@@ -5,6 +5,7 @@
 //! the edge keeps serving the last good one rather than falling over.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -87,7 +88,15 @@ pub fn watch_every(path: PathBuf, snap: Arc<Snapshot>, every: Duration) {
 /// Same contract as the file watcher: a snapshot that doesn't parse is logged and
 /// dropped, and an unreachable control plane changes nothing. The edge keeps serving
 /// whatever it last agreed with - a control plane outage must not become an outage.
-pub fn watch_remote(base: String, snap: Arc<Snapshot>, every: Duration) {
+/// `revision` is where the revision actually in force is published, for the fleet
+/// heartbeat to report. It is set only after a snapshot has parsed and been stored, so
+/// it can never claim a revision this node refused.
+pub fn watch_remote(
+    base: String,
+    snap: Arc<Snapshot>,
+    every: Duration,
+    revision: Arc<AtomicI64>,
+) {
     let cp = match crate::cp::ControlPlane::from_env(&base) {
         Ok(cp) => cp,
         Err(e) => {
@@ -115,6 +124,10 @@ pub fn watch_remote(base: String, snap: Arc<Snapshot>, every: Duration) {
                             running = pulled.revision;
                             last_err.clear();
                             snap.store(cfg);
+                            /* after the store, never before: this is what the fleet
+                               view calls "acknowledged", and acknowledging a config
+                               we had not actually taken would be a lie */
+                            revision.store(pulled.revision, Ordering::Relaxed);
                         }
                         Err(e) => {
                             /* don't record the revision, so a fixed one still lands */

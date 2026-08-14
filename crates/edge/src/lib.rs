@@ -11,6 +11,7 @@ pub mod client_ip;
 pub mod compress;
 pub mod config;
 pub mod cp;
+pub mod fleet;
 pub mod limits;
 pub mod logging;
 pub mod metrics;
@@ -65,6 +66,12 @@ pub struct Edge {
     /// ACME http-01 answers, checked before routing - see `proxy::handle`.
     pub challenges: Arc<acme::Challenges>,
     pub tls: Option<Arc<Tls>>,
+    /// The config revision being served, or `fleet::NO_REVISION` when this node
+    /// follows a local file. Written by the config puller, read by the heartbeat -
+    /// which is what makes a rollout acknowledgement mean anything.
+    pub revision: Arc<std::sync::atomic::AtomicI64>,
+    /// Wall clock at boot, so the fleet view can say when this node came up.
+    pub started_at_ms: u64,
     pipeline: Arc<Pipeline>,
     node: NodeLimits,
 }
@@ -105,6 +112,8 @@ impl Edge {
             origins,
             challenges: acme::Challenges::new(),
             tls,
+            revision: fleet::revision_cell(),
+            started_at_ms: analytics::now_ms(),
             pipeline,
             node,
         })

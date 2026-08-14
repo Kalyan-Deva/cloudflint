@@ -10,11 +10,22 @@ use std::time::Instant;
 
 use cloudflint_edge::metrics::{self, Counter};
 
+/// Fleet totals, read at scrape time like everything else that lives elsewhere.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Fleet {
+    pub online: usize,
+    pub degraded: usize,
+    pub offline: usize,
+    pub up_to_date: usize,
+    pub requests_per_sec: f64,
+}
+
 pub struct ApiMetrics {
     pub started: Instant,
     pub events: Counter,
     pub config_writes: Counter,
     pub purges: Counter,
+    pub heartbeats: Counter,
 }
 
 impl ApiMetrics {
@@ -37,16 +48,52 @@ impl ApiMetrics {
                 "Purges fanned out to edges, by whether every edge agreed.",
                 &["outcome"],
             ),
+            heartbeats: Counter::new(
+                "cloudflint_api_heartbeats_total",
+                "Heartbeats accepted from edges.",
+                &[],
+            ),
         })
     }
 
     /// The scrape body. Same format as the edge's, and the same rule: counters come
     /// from the registry, everything else is read where it lives.
-    pub fn render(&self, revisions: Option<i64>, edges: usize) -> String {
+    ///
+    /// `fleet` is None when the database could not be read. A scrape must not fail just
+    /// because one of its numbers is unavailable - an unreadable database is exactly when
+    /// somebody is looking at this - so the series is left out instead.
+    pub fn render(&self, revisions: Option<i64>, edges: usize, fleet: Option<Fleet>) -> String {
         let mut out = String::with_capacity(1024);
         self.events.render_into(&mut out);
         self.config_writes.render_into(&mut out);
         self.purges.render_into(&mut out);
+        self.heartbeats.render_into(&mut out);
+
+        if let Some(fleet) = fleet {
+            metrics::labelled_gauges(
+                &mut out,
+                "cloudflint_fleet_edges",
+                "Edges known to this control plane, by derived status.",
+                "status",
+                &[
+                    ("online", fleet.online as f64),
+                    ("degraded", fleet.degraded as f64),
+                    ("offline", fleet.offline as f64),
+                ],
+            );
+            metrics::gauge(
+                &mut out,
+                "cloudflint_fleet_edges_up_to_date",
+                "Edges serving the config revision the fleet is meant to be on.",
+                fleet.up_to_date as f64,
+            );
+            metrics::gauge(
+                &mut out,
+                "cloudflint_fleet_requests_per_second",
+                "Requests per second across the fleet, as last reported by each node.",
+                fleet.requests_per_sec,
+            );
+        }
 
         metrics::gauge(
             &mut out,

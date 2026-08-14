@@ -300,6 +300,33 @@ handful of failures, and a guess that can take the whole site down is worse than
 
 Per-origin health shows up in `/admin/stats` and as `cloudflint_origin_healthy{zone,origin}`.
 
+### Fleet
+
+With a `control_plane` set, each edge reports in on a timer. It registers itself on its
+first heartbeat, so nodes are never enrolled by hand.
+
+```yaml
+fleet:
+  enabled: true      # default; a no-op without a control_plane
+  heartbeat_secs: 15 # default
+```
+
+Which node this is comes from the environment, not from this file — one config revision is
+shared by the whole fleet, so anything in it is the same everywhere. Set
+`CLOUDFLINT_EDGE_ID` (defaults to the hostname), `CLOUDFLINT_REGION` and
+`CLOUDFLINT_EDGE_LABEL` per node.
+
+Each heartbeat carries the node's version, uptime, the config revision it is actually
+serving, CPU and memory, active connections, requests per second, cache size, origin
+health and per-zone certificate status. The reply names the revision the fleet is meant to
+be on, which is how a rollout is acknowledged.
+
+`GET /v1/edges` derives each node's state rather than storing it: `offline` after 45
+seconds of silence, `degraded` while draining, behind on config, or with unhealthy
+origins, and `online` otherwise. Nodes are listed in the dashboard's **Fleet** page, with
+counts per region. A node that has been decommissioned can be forgotten with
+`DELETE /v1/edges/{id}`; one that is merely unreachable reappears on its next heartbeat.
+
 ### Behind a load balancer
 
 Rate limits, `ip.src` rules and the log all key on the client's address. By default that
@@ -348,12 +375,15 @@ Secrets come from the environment, not from config.
 `/health` on both APIs is unauthenticated so orchestrators can probe it. Everything
 else needs a bearer token.
 
-Two more environment variables, neither of them secret:
+More environment variables, none of them secret:
 
 | Variable | Where | What |
 |---|---|---|
 | `CLOUDFLINT_LOG_FORMAT` | both | `json` for one JSON object per line; anything else is the human format |
 | `CLOUDFLINT_METRICS_OPEN` | both | `1` serves `/metrics` without a token |
+| `CLOUDFLINT_EDGE_ID` | edge | this node's name in the fleet; defaults to the hostname |
+| `CLOUDFLINT_REGION` | edge | region or POP label, e.g. `lhr` |
+| `CLOUDFLINT_EDGE_LABEL` | edge | free-text description shown in the fleet view |
 
 `RUST_LOG` sets the level and filter as usual; the default is `info`.
 
@@ -372,6 +402,9 @@ Two more environment variables, neither of them secret:
 | `GET /v1/analytics/timeseries` | bucketed counts for the traffic chart |
 | `POST /v1/purge` | `{url}`, `{tag}`, `{zone}` or `{all:true}` |
 | `GET/POST/DELETE /v1/tokens` | mint, list, revoke |
+| `GET /v1/edges` | the fleet: every node, its state and counts per region |
+| `POST /v1/edges/{id}/heartbeat` | a node reporting in; answers with the revision it should be on |
+| `DELETE /v1/edges/{id}` | forget a decommissioned node |
 
 Edge admin API: `/admin/health`, `/admin/stats`, `/admin/origins`,
 `/admin/certificates`, `/admin/recent`, `/admin/stream` (SSE), `/admin/purge`, `/metrics`.
@@ -442,9 +475,11 @@ From the edge:
 
 A request that matched no zone is labelled `zone="unrouted"`. From the control plane:
 `cloudflint_api_events_ingested_total`, `cloudflint_api_config_writes_total{kind}`,
-`cloudflint_api_purges_total{outcome}`, `cloudflint_api_uptime_seconds`,
-`cloudflint_api_edges_configured`, `cloudflint_api_active_revision`,
-`cloudflint_api_build_info`.
+`cloudflint_api_purges_total{outcome}`, `cloudflint_api_heartbeats_total`,
+`cloudflint_api_uptime_seconds`, `cloudflint_api_edges_configured`,
+`cloudflint_api_active_revision`, `cloudflint_api_build_info`, plus the fleet:
+`cloudflint_fleet_edges{status}` (`online`/`degraded`/`offline`),
+`cloudflint_fleet_edges_up_to_date` and `cloudflint_fleet_requests_per_second`.
 
 ## Tests
 
@@ -454,7 +489,8 @@ cargo test
 
 Unit tests plus integration tests that run real origins over real sockets: forwarding,
 TLS and HTTP/2, upgrades, WAF rule fixtures, cache behaviour, rate limits, shutdown
-draining, client-IP resolution, and the full edge/control-plane loop.
+draining, client-IP resolution, fleet registration and rollout acknowledgement, and the
+full edge/control-plane loop.
 
 CI runs `cargo clippy -D warnings` and the suite on Linux and Windows — both, because the
 signal handling is written twice behind `cfg(unix)` and `cfg(windows)` — plus the

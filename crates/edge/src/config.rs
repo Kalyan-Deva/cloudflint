@@ -37,7 +37,27 @@ pub struct Config {
     /// Where to get certificates automatically. None means every certificate is somebody
     /// else's problem, which is the default.
     pub acme: Option<AcmeConfig>,
+    /// How this node reports itself to the control plane. Only the timing lives here -
+    /// *which* node this is comes from the environment, because one config revision is
+    /// shared by the whole fleet. See `fleet`.
+    pub fleet: FleetConfig,
     pub zones: Vec<Zone>,
+}
+
+/// Heartbeat timing. Node-wide, and only meaningful with a `control_plane` set.
+#[derive(Debug, Clone, Copy)]
+pub struct FleetConfig {
+    pub enabled: bool,
+    pub heartbeat: Duration,
+}
+
+impl Default for FleetConfig {
+    fn default() -> Self {
+        FleetConfig {
+            enabled: true,
+            heartbeat: Duration::from_secs(15),
+        }
+    }
 }
 
 /// One ACME server, for the whole node.
@@ -347,7 +367,20 @@ pub fn parse(text: &str) -> Result<Config> {
             redirect_http: t.redirect_http,
         }),
         acme: acme_from(raw.acme, &zones)?,
+        fleet: fleet_from(raw.fleet)?,
         zones,
+    })
+}
+
+fn fleet_from(raw: raw::Fleet) -> Result<FleetConfig> {
+    /* a zero interval is a busy loop against the control plane, and the lower bound is
+       there because a heartbeat is a whole http request plus an os sample */
+    if raw.enabled && raw.heartbeat_secs == 0 {
+        bail!("fleet.heartbeat_secs must be > 0");
+    }
+    Ok(FleetConfig {
+        enabled: raw.enabled,
+        heartbeat: Duration::from_secs(raw.heartbeat_secs),
     })
 }
 
@@ -731,7 +764,28 @@ mod raw {
         pub tls: Option<Tls>,
         #[serde(default)]
         pub acme: Option<Acme>,
+        #[serde(default)]
+        pub fleet: Fleet,
         pub zones: Vec<Zone>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Fleet {
+        /// On by default, and a no-op without a control plane to report to.
+        #[serde(default = "yes")]
+        pub enabled: bool,
+        #[serde(default = "default_heartbeat")]
+        pub heartbeat_secs: u64,
+    }
+
+    impl Default for Fleet {
+        fn default() -> Self {
+            Fleet {
+                enabled: yes(),
+                heartbeat_secs: default_heartbeat(),
+            }
+        }
     }
 
     #[derive(Deserialize)]
@@ -1122,6 +1176,11 @@ mod raw {
     fn default_acme_timeout() -> u64 {
         90
     }
+    /// Often enough that a node going quiet is noticed while it still matters, rarely
+    /// enough that a hundred edges are not a load on the control plane by themselves.
+    fn default_heartbeat() -> u64 {
+        15
+    }
     fn default_timeout_ms() -> u64 {
         30_000
     }
@@ -1254,6 +1313,22 @@ mod raw {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The example config that ships with the repo, embedded at compile time so this
+    /// does not depend on the working directory.
+    const SHIPPED_EXAMPLE: &str = include_str!("../../../cloudflint.yaml");
+
+    #[test]
+    fn the_example_config_in_the_repo_still_parses() {
+        /* it is the first thing anyone copies, and `deny_unknown_fields` means a key
+           that gets renamed or removed turns it into a file that cannot start an edge.
+           nothing else in the suite reads it, so nothing else would notice */
+        let cfg = parse(SHIPPED_EXAMPLE).expect("the shipped cloudflint.yaml should parse");
+        assert!(!cfg.zones.is_empty(), "the example should show at least one zone");
+        /* and the documented defaults should be what the example says they are */
+        assert!(cfg.fleet.enabled);
+        assert_eq!(cfg.fleet.heartbeat, Duration::from_secs(15));
+    }
 
     const SAMPLE: &str = r#"
 listen: "127.0.0.1:9000"

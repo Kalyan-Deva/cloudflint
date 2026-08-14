@@ -243,6 +243,19 @@ impl Counter {
         self.peek(labels, |v| v.load(Ordering::Relaxed)).unwrap_or(0)
     }
 
+    /// Every series added together, whatever its labels.
+    ///
+    /// A rate needs one number, and `requests` is broken down by zone, status and
+    /// stage - asking for a particular combination would silently miss traffic the
+    /// moment a new one appears.
+    pub fn total(&self) -> u64 {
+        let series = self.series.read().unwrap_or_else(|e| e.into_inner());
+        series
+            .values()
+            .map(|s| s.value.load(Ordering::Relaxed))
+            .sum()
+    }
+
     pub fn render_into(&self, out: &mut String) {
         self.header(out, "counter");
         for line in self.sorted(|labels, value| {
@@ -649,6 +662,25 @@ pub fn labelled_gauge(
     value: f64,
 ) {
     sample(out, name, help, "gauge", labels, value);
+}
+
+/// One gauge with several series, e.g. `fleet_edges{status="online"}`.
+///
+/// Separate from `labelled_gauge` because HELP and TYPE belong to the metric, not to
+/// each series - repeating them per series is malformed, and Prometheus is entitled to
+/// reject the whole scrape for it.
+pub fn labelled_gauges(
+    out: &mut String,
+    name: &str,
+    help: &str,
+    label: &str,
+    series: &[(&str, f64)],
+) {
+    let _ = writeln!(out, "# HELP {name} {help}");
+    let _ = writeln!(out, "# TYPE {name} gauge");
+    for (value_label, value) in series {
+        let _ = writeln!(out, "{name}{{{label}=\"{}\"}} {value}", escape(value_label));
+    }
 }
 
 fn sample(out: &mut String, name: &str, help: &str, kind: &str, labels: &[(&str, &str)], value: f64) {

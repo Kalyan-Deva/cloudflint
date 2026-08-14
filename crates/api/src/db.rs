@@ -47,8 +47,37 @@ CREATE TABLE IF NOT EXISTS tokens (
     last_used_at INTEGER
 );
 
+-- one row per edge, replaced wholesale by each heartbeat. the fleet is small enough
+-- that history per node belongs in the metrics system rather than here.
+CREATE TABLE IF NOT EXISTS edges (
+    edge_id             TEXT    PRIMARY KEY,
+    region              TEXT,
+    label               TEXT,
+    version             TEXT    NOT NULL DEFAULT '',
+    started_at_ms       INTEGER NOT NULL DEFAULT 0,
+    first_seen_ms       INTEGER NOT NULL,
+    last_seen_ms        INTEGER NOT NULL,
+    active_revision     INTEGER NOT NULL DEFAULT -1,
+    -- when this node first reported the revision it is on, so a rollout can be timed
+    acked_at_ms         INTEGER,
+    draining            INTEGER NOT NULL DEFAULT 0,
+    cpu_percent         REAL    NOT NULL DEFAULT 0,
+    memory_bytes        INTEGER NOT NULL DEFAULT 0,
+    memory_total_bytes  INTEGER NOT NULL DEFAULT 0,
+    connections_active  INTEGER NOT NULL DEFAULT 0,
+    requests_total      INTEGER NOT NULL DEFAULT 0,
+    requests_per_sec    REAL    NOT NULL DEFAULT 0,
+    cache_entries       INTEGER NOT NULL DEFAULT 0,
+    cache_bytes         INTEGER NOT NULL DEFAULT 0,
+    zones               INTEGER NOT NULL DEFAULT 0,
+    origins_total       INTEGER NOT NULL DEFAULT 0,
+    origins_healthy     INTEGER NOT NULL DEFAULT 0,
+    certificates        TEXT    NOT NULL DEFAULT '[]'
+);
+
 CREATE INDEX IF NOT EXISTS events_at ON events(at_ms);
 CREATE INDEX IF NOT EXISTS events_zone_at ON events(zone, at_ms);
+CREATE INDEX IF NOT EXISTS edges_last_seen ON edges(last_seen_ms);
 "#;
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,6 +121,43 @@ pub struct Bucket {
     pub errors: u64,
     pub cache_hits: u64,
     pub p95_us: u64,
+}
+
+/// One node as the control plane last heard it, plus what that means now.
+#[derive(Debug, Clone, Serialize)]
+pub struct EdgeView {
+    pub edge_id: String,
+    pub region: Option<String>,
+    pub label: Option<String>,
+    pub version: String,
+    pub started_at_ms: i64,
+    pub first_seen_ms: i64,
+    pub last_seen_ms: i64,
+    /// Seconds since the last heartbeat, which is what "is it alive" actually means.
+    pub last_seen_age_s: i64,
+    pub uptime_s: i64,
+    pub active_revision: i64,
+    pub acked_at_ms: Option<i64>,
+    /// True when this node is serving the revision the fleet is supposed to be on.
+    pub up_to_date: bool,
+    pub draining: bool,
+    /// online, degraded or offline. Derived, never stored - a stored status would be
+    /// wrong the moment a node goes quiet without saying so.
+    pub status: &'static str,
+    /// Why it is not simply online, for the one case where that needs a sentence.
+    pub note: Option<String>,
+    pub cpu_percent: f64,
+    pub memory_bytes: i64,
+    pub memory_total_bytes: i64,
+    pub connections_active: i64,
+    pub requests_total: i64,
+    pub requests_per_sec: f64,
+    pub cache_entries: i64,
+    pub cache_bytes: i64,
+    pub zones: i64,
+    pub origins_total: i64,
+    pub origins_healthy: i64,
+    pub certificates: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -204,6 +270,158 @@ impl Db {
             params![id],
         )?;
         Ok(())
+    }
+
+    /// Record a heartbeat, registering the node if this is the first one.
+    ///
+    /// Registration is not a separate call on purpose: a node that can heartbeat is
+    /// registered, and one that cannot is not interesting. That also means a control
+    /// plane restarting, or its database being replaced, heals itself within one
+    /// interval instead of needing every edge to be told to enrol again.
+    pub fn record_heartbeat(&self, beat: &cloudflint_edge::fleet::Heartbeat, now: i64) -> Result<()> {
+        let certificates = serde_json::to_string(&beat.certificates).unwrap_or_else(|_| "[]".into());
+        let conn = self.lock();
+
+        /* acked_at is kept when the revision has not changed, so it records when this
+           node *reached* the revision rather than when it last mentioned it */
+        conn.execute(
+            "INSERT INTO edges (
+                 edge_id, region, label, version, started_at_ms, first_seen_ms, last_seen_ms,
+                 active_revision, acked_at_ms, draining, cpu_percent, memory_bytes,
+                 memory_total_bytes, connections_active, requests_total, requests_per_sec,
+                 cache_entries, cache_bytes, zones, origins_total, origins_healthy, certificates
+             ) VALUES (?1,?2,?3,?4,?5,?6,?6,?7,?6,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
+             ON CONFLICT(edge_id) DO UPDATE SET
+                 region = excluded.region,
+                 label = excluded.label,
+                 version = excluded.version,
+                 started_at_ms = excluded.started_at_ms,
+                 last_seen_ms = excluded.last_seen_ms,
+                 acked_at_ms = CASE
+                     WHEN edges.active_revision = excluded.active_revision THEN edges.acked_at_ms
+                     ELSE excluded.last_seen_ms
+                 END,
+                 active_revision = excluded.active_revision,
+                 draining = excluded.draining,
+                 cpu_percent = excluded.cpu_percent,
+                 memory_bytes = excluded.memory_bytes,
+                 memory_total_bytes = excluded.memory_total_bytes,
+                 connections_active = excluded.connections_active,
+                 requests_total = excluded.requests_total,
+                 requests_per_sec = excluded.requests_per_sec,
+                 cache_entries = excluded.cache_entries,
+                 cache_bytes = excluded.cache_bytes,
+                 zones = excluded.zones,
+                 origins_total = excluded.origins_total,
+                 origins_healthy = excluded.origins_healthy,
+                 certificates = excluded.certificates",
+            params![
+                beat.edge_id,
+                beat.region,
+                beat.label,
+                beat.version,
+                beat.started_at_ms as i64,
+                now,
+                beat.active_revision,
+                beat.draining as i64,
+                beat.cpu_percent,
+                beat.memory_bytes as i64,
+                beat.memory_total_bytes as i64,
+                beat.connections_active as i64,
+                beat.requests_total as i64,
+                beat.requests_per_sec,
+                beat.cache_entries as i64,
+                beat.cache_bytes as i64,
+                beat.zones as i64,
+                beat.origins_total as i64,
+                beat.origins_healthy as i64,
+                certificates,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The whole fleet, most recently heard from first.
+    ///
+    /// `offline_after_s` decides what counts as gone; it comes from the caller because
+    /// it is derived from the heartbeat interval, which is the edge's setting.
+    pub fn edges(&self, desired_revision: Option<i64>, offline_after_s: i64, now: i64) -> Result<Vec<EdgeView>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT edge_id, region, label, version, started_at_ms, first_seen_ms, last_seen_ms,
+                    active_revision, acked_at_ms, draining, cpu_percent, memory_bytes,
+                    memory_total_bytes, connections_active, requests_total, requests_per_sec,
+                    cache_entries, cache_bytes, zones, origins_total, origins_healthy, certificates
+             FROM edges ORDER BY last_seen_ms DESC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let last_seen_ms: i64 = row.get(6)?;
+            let started_at_ms: i64 = row.get(4)?;
+            let active_revision: i64 = row.get(7)?;
+            let draining: bool = row.get::<_, i64>(9)? == 1;
+            let origins_total: i64 = row.get(19)?;
+            let origins_healthy: i64 = row.get(20)?;
+            let certificates: String = row.get(21)?;
+
+            let last_seen_age_s = (now - last_seen_ms).max(0) / 1000;
+            let (status, note) = status_of(
+                last_seen_age_s,
+                offline_after_s,
+                draining,
+                desired_revision,
+                active_revision,
+                origins_total,
+                origins_healthy,
+            );
+
+            Ok(EdgeView {
+                edge_id: row.get(0)?,
+                region: row.get(1)?,
+                label: row.get(2)?,
+                version: row.get(3)?,
+                started_at_ms,
+                first_seen_ms: row.get(5)?,
+                last_seen_ms,
+                last_seen_age_s,
+                uptime_s: match started_at_ms > 0 {
+                    true => (last_seen_ms - started_at_ms).max(0) / 1000,
+                    false => 0,
+                },
+                active_revision,
+                acked_at_ms: row.get(8)?,
+                up_to_date: match desired_revision {
+                    Some(want) => active_revision == want,
+                    None => true,
+                },
+                draining,
+                status,
+                note,
+                cpu_percent: row.get(10)?,
+                memory_bytes: row.get(11)?,
+                memory_total_bytes: row.get(12)?,
+                connections_active: row.get(13)?,
+                requests_total: row.get(14)?,
+                requests_per_sec: row.get(15)?,
+                cache_entries: row.get(16)?,
+                cache_bytes: row.get(17)?,
+                zones: row.get(18)?,
+                origins_total,
+                origins_healthy,
+                /* stored as text because sqlite has no json type worth using; parsed
+                   back here so the dashboard gets structure rather than a string */
+                certificates: serde_json::from_str(&certificates)
+                    .unwrap_or(serde_json::Value::Array(vec![])),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Forget a node. For one that has been decommissioned - otherwise it sits in the
+    /// fleet view as permanently offline.
+    pub fn forget_edge(&self, edge_id: &str) -> Result<bool> {
+        let conn = self.lock();
+        Ok(conn.execute("DELETE FROM edges WHERE edge_id = ?1", params![edge_id])? > 0)
     }
 
     /// Only the hash is stored. The token itself is shown once, when it is minted.
@@ -407,6 +625,62 @@ impl Db {
     }
 }
 
+/// What to call a node, and why.
+///
+/// Derived on every read rather than stored, because the interesting state is *silence*
+/// and silence does not arrive as an update. A node that dies without a word would keep
+/// whatever status it last wrote, forever, which is precisely the case this has to get
+/// right.
+///
+/// Order matters: offline beats everything, because nothing else can be known about a
+/// node that isn't talking. Draining is next - it is deliberate, so reporting it as
+/// unhealthy would cry wolf during every deploy.
+#[allow(clippy::too_many_arguments)]
+fn status_of(
+    last_seen_age_s: i64,
+    offline_after_s: i64,
+    draining: bool,
+    desired_revision: Option<i64>,
+    active_revision: i64,
+    origins_total: i64,
+    origins_healthy: i64,
+) -> (&'static str, Option<String>) {
+    if last_seen_age_s > offline_after_s {
+        return (
+            "offline",
+            Some(format!("no heartbeat for {last_seen_age_s}s")),
+        );
+    }
+    if draining {
+        return ("degraded", Some("draining, on its way out".into()));
+    }
+    if origins_total > 0 && origins_healthy == 0 {
+        return (
+            "degraded",
+            Some("every origin is unhealthy on this node".into()),
+        );
+    }
+
+    /* -1 means this node follows a local file, so there is no revision to be behind */
+    if let Some(want) = desired_revision {
+        if active_revision != want && active_revision != cloudflint_edge::fleet::NO_REVISION {
+            return (
+                "degraded",
+                Some(format!(
+                    "on config revision {active_revision}, fleet is on {want}"
+                )),
+            );
+        }
+    }
+    if origins_total > 0 && origins_healthy < origins_total {
+        return (
+            "degraded",
+            Some(format!("{origins_healthy} of {origins_total} origins healthy")),
+        );
+    }
+    ("online", None)
+}
+
 /// Nearest-rank percentile. Exact rather than estimated, which is affordable at the
 /// volumes a single node produces and avoids explaining a sketch to anyone.
 fn percentile(
@@ -428,6 +702,7 @@ fn percentile(
     Ok(value as u64)
 }
 
+
 fn group(
     conn: &Connection,
     column: &str,
@@ -448,4 +723,196 @@ fn group(
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64)),
     )?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A node that has just reported in, healthy and on the right config.
+    fn healthy() -> (i64, i64, bool, Option<i64>, i64, i64, i64) {
+        (2, 45, false, Some(7), 7, 2, 2)
+    }
+
+    fn call(args: (i64, i64, bool, Option<i64>, i64, i64, i64)) -> (&'static str, Option<String>) {
+        status_of(args.0, args.1, args.2, args.3, args.4, args.5, args.6)
+    }
+
+    #[test]
+    fn a_node_reporting_in_and_keeping_up_is_online() {
+        let (status, note) = call(healthy());
+        assert_eq!(status, "online");
+        assert!(note.is_none(), "online needs no explanation");
+    }
+
+    #[test]
+    fn silence_past_the_deadline_is_offline() {
+        let mut args = healthy();
+        args.0 = 46;
+        let (status, note) = call(args);
+        assert_eq!(status, "offline");
+        assert!(note.unwrap().contains("46s"));
+    }
+
+    #[test]
+    fn one_missed_beat_is_not_offline() {
+        /* the threshold is three intervals precisely so a single lost packet or a busy
+           moment does not take a node out of the fleet */
+        let mut args = healthy();
+        args.0 = 45;
+        assert_eq!(call(args).0, "online");
+    }
+
+    #[test]
+    fn offline_beats_everything_else() {
+        /* nothing else can be known about a node that is not talking, so a stale
+           report of being behind or draining must not outrank the silence */
+        let mut args = healthy();
+        args.0 = 600;
+        args.2 = true;
+        args.4 = 1;
+        args.6 = 0;
+        assert_eq!(call(args).0, "offline");
+    }
+
+    #[test]
+    fn draining_outranks_being_behind() {
+        /* a node on its way out is expected to stop taking config; reporting that as a
+           rollout failure would cry wolf on every deploy */
+        let mut args = healthy();
+        args.2 = true;
+        args.4 = 1;
+        let (status, note) = call(args);
+        assert_eq!(status, "degraded");
+        assert!(note.unwrap().contains("draining"));
+    }
+
+    #[test]
+    fn every_origin_down_outranks_being_behind() {
+        let mut args = healthy();
+        args.4 = 1;
+        args.6 = 0;
+        assert!(call(args).1.unwrap().contains("every origin"));
+    }
+
+    #[test]
+    fn being_behind_on_config_is_degraded() {
+        let mut args = healthy();
+        args.4 = 5;
+        let (status, note) = call(args);
+        assert_eq!(status, "degraded");
+        let note = note.unwrap();
+        assert!(note.contains('5') && note.contains('7'), "note was {note}");
+    }
+
+    #[test]
+    fn a_node_on_a_local_file_is_never_behind() {
+        let mut args = healthy();
+        args.4 = cloudflint_edge::fleet::NO_REVISION;
+        assert_eq!(call(args).0, "online");
+    }
+
+    #[test]
+    fn no_desired_revision_means_nothing_to_compare() {
+        let mut args = healthy();
+        args.3 = None;
+        args.4 = 3;
+        assert_eq!(call(args).0, "online");
+    }
+
+    #[test]
+    fn some_origins_down_is_degraded_but_lower_priority() {
+        let mut args = healthy();
+        args.6 = 1;
+        let (status, note) = call(args);
+        assert_eq!(status, "degraded");
+        assert!(note.unwrap().contains("1 of 2"));
+    }
+
+    #[test]
+    fn a_node_serving_no_origins_at_all_is_not_called_unhealthy() {
+        /* zero of zero healthy is a node with no zones, not a broken one - the guard
+           on origins_total is what keeps this from reading as an outage */
+        let mut args = healthy();
+        args.5 = 0;
+        args.6 = 0;
+        assert_eq!(call(args).0, "online");
+    }
+
+    #[test]
+    fn an_acked_revision_keeps_its_timestamp_across_heartbeats() {
+        let db = Db::open(":memory:").unwrap();
+        let mut beat = cloudflint_edge::fleet::Heartbeat {
+            edge_id: "e".into(),
+            region: None,
+            label: None,
+            version: "0.1.0".into(),
+            started_at_ms: 0,
+            uptime_s: 0,
+            active_revision: 4,
+            draining: false,
+            cpu_percent: 0.0,
+            memory_bytes: 0,
+            memory_total_bytes: 0,
+            connections_active: 0,
+            requests_total: 0,
+            requests_per_sec: 0.0,
+            cache_entries: 0,
+            cache_bytes: 0,
+            zones: 0,
+            origins_total: 0,
+            origins_healthy: 0,
+            certificates: vec![],
+        };
+
+        db.record_heartbeat(&beat, 1_000).unwrap();
+        let first = db.edges(Some(4), 45, 1_000).unwrap()[0].acked_at_ms;
+        assert_eq!(first, Some(1_000));
+
+        /* same revision, later beat: the ack is when it *reached* that revision, so it
+           must not creep forward every time the node mentions it again */
+        db.record_heartbeat(&beat, 9_000).unwrap();
+        assert_eq!(db.edges(Some(4), 45, 9_000).unwrap()[0].acked_at_ms, Some(1_000));
+
+        /* a new revision is a new ack */
+        beat.active_revision = 5;
+        db.record_heartbeat(&beat, 12_000).unwrap();
+        assert_eq!(db.edges(Some(5), 45, 12_000).unwrap()[0].acked_at_ms, Some(12_000));
+    }
+
+    #[test]
+    fn first_seen_survives_later_heartbeats() {
+        let db = Db::open(":memory:").unwrap();
+        let beat = cloudflint_edge::fleet::Heartbeat {
+            edge_id: "e".into(),
+            region: None,
+            label: None,
+            version: "0.1.0".into(),
+            started_at_ms: 500,
+            uptime_s: 0,
+            active_revision: -1,
+            draining: false,
+            cpu_percent: 0.0,
+            memory_bytes: 0,
+            memory_total_bytes: 0,
+            connections_active: 0,
+            requests_total: 0,
+            requests_per_sec: 0.0,
+            cache_entries: 0,
+            cache_bytes: 0,
+            zones: 0,
+            origins_total: 0,
+            origins_healthy: 0,
+            certificates: vec![],
+        };
+
+        db.record_heartbeat(&beat, 1_000).unwrap();
+        db.record_heartbeat(&beat, 5_000).unwrap();
+
+        let view = &db.edges(None, 45, 5_000).unwrap()[0];
+        assert_eq!(view.first_seen_ms, 1_000, "first seen is when we first heard of it");
+        assert_eq!(view.last_seen_ms, 5_000);
+        assert_eq!(view.last_seen_age_s, 0);
+        /* uptime is measured from the node's own clock, against the beat we last had */
+        assert_eq!(view.uptime_s, (5_000 - 500) / 1000);
+    }
 }

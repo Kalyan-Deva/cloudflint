@@ -46,6 +46,7 @@ const NAV = [
   {
     section: "control",
     items: [
+      { href: "/fleet", label: "Fleet", icon: Nodes },
       { href: "/config", label: "Config", icon: Doc },
       { href: "/tokens", label: "Tokens", icon: Key },
     ],
@@ -275,6 +276,17 @@ function Shield() {
   return (
     <svg {...ico}>
       <path d="M8 1.6l5 2v4.2c0 3-2.1 5.3-5 6.6-2.9-1.3-5-3.6-5-6.6V3.6l5-2z" {...line} />
+    </svg>
+  );
+}
+/* several nodes reporting to one place - the fleet, drawn as what it is */
+function Nodes() {
+  return (
+    <svg {...ico}>
+      <circle cx="8" cy="3.2" r="1.7" {...line} />
+      <circle cx="3.2" cy="12.4" r="1.7" {...line} />
+      <circle cx="12.8" cy="12.4" r="1.7" {...line} />
+      <path d="M6.9 4.6L4.2 10.9M9.1 4.6l2.7 6.3M4.9 12.4h6.2" {...line} />
     </svg>
   );
 }

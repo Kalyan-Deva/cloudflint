@@ -62,6 +62,9 @@ pub fn router(api: Api) -> Router {
         .route("/v1/analytics/summary", get(summary))
         .route("/v1/analytics/timeseries", get(timeseries))
         .route("/v1/zones", get(zones))
+        .route("/v1/edges", get(list_edges))
+        .route("/v1/edges/{id}", axum::routing::delete(forget_edge))
+        .route("/v1/edges/{id}/heartbeat", post(heartbeat))
         .route("/v1/waf/test", post(waf_test))
         .route("/v1/purge", post(purge))
         .route("/v1/tokens", get(list_tokens).post(mint_token))
@@ -99,7 +102,24 @@ async fn metrics(State(api): State<Api>) -> impl IntoResponse {
        somebody is looking at this, so it reports what it can and leaves the revision
        out rather than answering 500 */
     let revision = api.db.active_config().ok().flatten().map(|c| c.revision);
-    let body = api.metrics.render(revision, api.edges.len());
+    let fleet = api
+        .db
+        .edges(revision, OFFLINE_AFTER_S, now_ms())
+        .ok()
+        .map(|edges| crate::metrics::Fleet {
+            online: edges.iter().filter(|e| e.status == "online").count(),
+            degraded: edges.iter().filter(|e| e.status == "degraded").count(),
+            offline: edges.iter().filter(|e| e.status == "offline").count(),
+            up_to_date: edges.iter().filter(|e| e.up_to_date).count(),
+            /* summed from what each node last said, not measured here - an offline node
+               contributes nothing, which is the honest answer */
+            requests_per_sec: edges
+                .iter()
+                .filter(|e| e.status != "offline")
+                .map(|e| e.requests_per_sec)
+                .sum(),
+        });
+    let body = api.metrics.render(revision, api.edges.len(), fleet);
 
     (
         [(axum::http::header::CONTENT_TYPE, cloudflint_edge::metrics::CONTENT_TYPE)],
@@ -372,6 +392,104 @@ async fn zones(State(api): State<Api>) -> ApiResult {
         .collect();
 
     Ok(Json(json!({ "revision": active.revision, "zones": views })).into_response())
+}
+
+/// How long after its last heartbeat a node is called offline.
+///
+/// Three intervals: one missed beat is a lost packet or a busy moment, three in a row is
+/// a node that has stopped talking. The interval is the edge's setting, so this is
+/// expressed in seconds and defaults to three times the default.
+const OFFLINE_AFTER_S: i64 = 45;
+
+/// A node reporting in. This both registers it and records the sample.
+///
+/// The id in the path has to match the one in the body: they can only differ if
+/// something is confused about which node this is, and guessing which to believe would
+/// be how one node's numbers end up filed under another's name.
+async fn heartbeat(
+    State(api): State<Api>,
+    Path(id): Path<String>,
+    Json(beat): Json<cloudflint_edge::fleet::Heartbeat>,
+) -> ApiResult {
+    if beat.edge_id != id {
+        return Err(bad_request(format!(
+            "this heartbeat is addressed to `{id}` but says it is from `{}`",
+            beat.edge_id
+        )));
+    }
+    if beat.edge_id.trim().is_empty() {
+        return Err(bad_request("an edge needs an id"));
+    }
+
+    let known = api.db.record_heartbeat(&beat, now_ms());
+    if let Err(e) = known {
+        return Err(internal(e));
+    }
+    api.metrics.heartbeats.inc(&[]);
+
+    /* the answer is the whole rollout mechanism: the node learns what it is supposed to
+       be running, and reports next time whether it got there */
+    let desired = api.db.active_config().ok().flatten().map(|c| c.revision);
+    Ok(Json(json!({ "desired_revision": desired })).into_response())
+}
+
+async fn list_edges(State(api): State<Api>) -> ApiResult {
+    let desired = api.db.active_config().map_err(internal)?.map(|c| c.revision);
+    let edges = api
+        .db
+        .edges(desired, OFFLINE_AFTER_S, now_ms())
+        .map_err(internal)?;
+
+    /* counted here rather than in the browser so the numbers on the page and the
+       numbers in a scrape come from the same place */
+    let online = edges.iter().filter(|e| e.status == "online").count();
+    let degraded = edges.iter().filter(|e| e.status == "degraded").count();
+    let offline = edges.iter().filter(|e| e.status == "offline").count();
+
+    Ok(Json(json!({
+        "desired_revision": desired,
+        "offline_after_s": OFFLINE_AFTER_S,
+        "counts": {
+            "total": edges.len(),
+            "online": online,
+            "degraded": degraded,
+            "offline": offline,
+            "up_to_date": edges.iter().filter(|e| e.up_to_date).count(),
+        },
+        "regions": regions_of(&edges),
+        "edges": edges,
+    }))
+    .into_response())
+}
+
+/// Per region, because a fleet view that cannot tell you a whole POP is dark is not
+/// worth having.
+fn regions_of(edges: &[crate::db::EdgeView]) -> Vec<serde_json::Value> {
+    let mut seen: Vec<(String, usize, usize)> = Vec::new();
+    for edge in edges {
+        let name = edge.region.clone().unwrap_or_else(|| "unlabelled".into());
+        match seen.iter_mut().find(|(r, _, _)| *r == name) {
+            Some((_, total, online)) => {
+                *total += 1;
+                *online += (edge.status == "online") as usize;
+            }
+            None => seen.push((name, 1, (edge.status == "online") as usize)),
+        }
+    }
+    seen.sort_by(|a, b| a.0.cmp(&b.0));
+    seen.into_iter()
+        .map(|(region, total, online)| json!({ "region": region, "total": total, "online": online }))
+        .collect()
+}
+
+async fn forget_edge(State(api): State<Api>, Path(id): Path<String>) -> ApiResult {
+    match api.db.forget_edge(&id).map_err(internal)? {
+        true => {
+            info!("edge `{id}` forgotten");
+            Ok(Json(json!({ "forgotten": id })).into_response())
+        }
+        false => Err(Problem(StatusCode::NOT_FOUND, format!("no edge `{id}`"))),
+    }
 }
 
 #[derive(Deserialize)]

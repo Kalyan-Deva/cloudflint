@@ -24,6 +24,7 @@ async fn main() -> Result<()> {
     let control_plane = cfg.control_plane.clone();
     let admin_listen = cfg.admin_listen;
     let tls_cfg = cfg.tls.clone();
+    let fleet_cfg = cfg.fleet;
 
     /* certificates load here rather than in the parser, so a bad path stops the
        edge starting instead of failing the first handshake of the day */
@@ -74,7 +75,22 @@ async fn main() -> Result<()> {
     match &control_plane {
         Some(url) => {
             info!("control plane at {url} - pulling config and shipping analytics there");
-            snapshot::watch_remote(url.clone(), snap.clone(), std::time::Duration::from_secs(5));
+            snapshot::watch_remote(
+                url.clone(),
+                snap.clone(),
+                std::time::Duration::from_secs(5),
+                edge.revision.clone(),
+            );
+            /* and report in, so the fleet view knows this node exists at all. after the
+               puller, so the first heartbeat is more likely to carry a real revision */
+            if fleet_cfg.enabled {
+                cloudflint_edge::fleet::spawn(
+                    edge.clone(),
+                    url.clone(),
+                    fleet_cfg.heartbeat,
+                    cloudflint_edge::fleet::Identity::from_env(),
+                );
+            }
         }
         None => snapshot::watch(path, snap.clone()),
     }
