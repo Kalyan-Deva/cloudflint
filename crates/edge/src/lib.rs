@@ -12,6 +12,7 @@ pub mod compress;
 pub mod config;
 pub mod cp;
 pub mod fleet;
+pub mod geoip;
 pub mod limits;
 pub mod logging;
 pub mod metrics;
