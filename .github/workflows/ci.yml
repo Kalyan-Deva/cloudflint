@@ -182,15 +182,19 @@ jobs:
   # never been built.
   docker:
     runs-on: ubuntu-latest
+    # every `docker compose` call re-reads the compose file, and the file refuses to
+    # interpolate without these - so they belong to the whole job, not to the step that
+    # happens to start the stack. scoped to `up` alone, `stop`, `logs` and `down` all fail
+    # after the interesting part has already passed.
+    env:
+      CLOUDFLINT_API_TOKEN: cfl_ci0000000000000000000000000000000000000000000000000000000000
+      CLOUDFLINT_ADMIN_TOKEN: cfl_ci1111111111111111111111111111111111111111111111111111111111
     steps:
       - uses: actions/checkout@v4
 
       - run: docker build -t cloudflint .
 
       - name: Bring the stack up
-        env:
-          CLOUDFLINT_API_TOKEN: cfl_ci0000000000000000000000000000000000000000000000000000000000
-          CLOUDFLINT_ADMIN_TOKEN: cfl_ci1111111111111111111111111111111111111111111111111111111111
         run: docker compose up -d --no-build
 
       - name: Wait for the edge to report healthy
