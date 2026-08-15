@@ -594,6 +594,13 @@ pub struct WafTest {
     pub vpn: bool,
     #[serde(default)]
     pub tor: bool,
+    /// Pretend the request scored this for automation, for rules using `bot.score`.
+    #[serde(default)]
+    pub bot_score: Option<u8>,
+    #[serde(default)]
+    pub bot_verified: bool,
+    #[serde(default)]
+    pub bot_name: Option<String>,
 }
 
 fn get_method() -> String {
@@ -676,6 +683,9 @@ async fn waf_test(State(api): State<Api>, Json(t): Json<WafTest>) -> ApiResult {
             hosting: t.hosting,
             vpn: t.vpn,
             tor: t.tor,
+            bot_score: t.bot_score.unwrap_or(99),
+            bot_verified: t.bot_verified,
+            bot_name: t.bot_name.as_deref().unwrap_or(""),
         },
         !t.body.is_empty(),
     );

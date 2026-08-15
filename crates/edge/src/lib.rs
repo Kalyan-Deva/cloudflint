@@ -6,7 +6,9 @@ pub mod admin;
 pub mod analytics;
 pub mod auth;
 pub mod body;
+pub mod bot;
 pub mod cache;
+pub mod challenge;
 pub mod client_ip;
 pub mod compress;
 pub mod config;
@@ -70,6 +72,9 @@ pub struct Edge {
     /// Rate limit token buckets. Out here rather than inside the pipeline because
     /// fleet-wide limits report and adjust them on a timer - see `limits::global`.
     pub buckets: Arc<limits::Buckets>,
+    /// How requests are scored for automation. Built once: the crawler list comes from
+    /// config, and nothing about it changes per request.
+    pub bots: Arc<bot::Detector>,
     /// Geo databases, if any are configured. Loaded at boot like certificates are, and
     /// for the same reason: a missing file should stop this node starting rather than
     /// fail the first request that asks where somebody is.
@@ -122,11 +127,21 @@ impl Edge {
             origins.clone(),
         ));
         let buckets = Arc::new(limits::Buckets::new(1 << 16));
+        /* the clearance secret is generated per node and never leaves it. two nodes
+           therefore do not honour each other's cookies - a client moving between them is
+           re-challenged, which costs one puzzle and means there is no shared secret to
+           distribute or leak */
+        let clearance = Arc::new(challenge::Challenges::new(
+            &challenge::node_secret(),
+            Duration::from_secs(1800),
+            challenge::DEFAULT_BITS,
+        ));
         let pipeline = Arc::new(stages::build(
             store.clone(),
             metrics.clone(),
             fetcher.clone(),
             buckets.clone(),
+            clearance,
         ));
         let node = boot.limits;
 
@@ -146,6 +161,7 @@ impl Edge {
             challenges: acme::Challenges::new(),
             tls,
             buckets,
+            bots: Arc::new(bot::Detector::default()),
             geo,
             revision: fleet::revision_cell(),
             started_at_ms: analytics::now_ms(),

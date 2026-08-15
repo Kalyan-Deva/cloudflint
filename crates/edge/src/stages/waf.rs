@@ -17,13 +17,38 @@ use crate::pipeline::{Ctx, Stage, StageError, Verdict};
 use crate::waf::{Decoded, Match, Outcome, Phase};
 
 pub struct Waf {
+    clearance: std::sync::Arc<crate::challenge::Challenges>,
     metrics: Arc<Metrics>,
 }
 
 impl Waf {
-    pub fn new(metrics: Arc<Metrics>) -> Self {
-        Self { metrics }
+    pub fn new(
+        metrics: Arc<Metrics>,
+        clearance: std::sync::Arc<crate::challenge::Challenges>,
+    ) -> Self {
+        Self { clearance, metrics }
     }
+}
+
+/// One cookie out of the request's Cookie header.
+fn cookie(ctx: &Ctx<'_>, name: &str) -> Option<String> {
+    ctx.headers()?
+        .get_all(hyper::header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|line| line.split(';'))
+        .find_map(|pair| {
+            let (k, v) = pair.split_once('=')?;
+            (k.trim() == name).then(|| v.trim().to_owned())
+        })
+}
+
+/// One query parameter, percent-decoded the same way every other field is.
+fn param(query: &str, name: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k == name).then(|| crate::waf::decode(v, true).into_owned())
+    })
 }
 
 #[async_trait]
@@ -42,7 +67,11 @@ impl Stage for Waf {
         match scan(ctx, "", Phase::Head, &mut log)? {
             Outcome::Block(hit) => {
                 self.report(ctx, &log);
-                return Ok(Verdict::Respond(self.blocked(ctx, &hit)));
+                /* a managed challenge can decide this request did not look automated
+                   enough to interrupt, in which case it carries on to the next stage */
+                if let Some(resp) = self.answer(ctx, &hit) {
+                    return Ok(Verdict::Respond(resp));
+                }
             }
             /* a skip rule wins outright - don't even read the body */
             Outcome::Skip(hit) => {
@@ -87,7 +116,7 @@ impl Waf {
                 severity: crate::waf::Severity::Medium,
             };
             self.report(ctx, log);
-            return Ok(Some(Verdict::Respond(self.blocked(ctx, &hit))));
+            return Ok(self.answer(ctx, &hit).map(Verdict::Respond));
         }
         if body.truncated {
             warn!(
@@ -100,7 +129,7 @@ impl Waf {
         match scan(ctx, &text, Phase::Body, log)? {
             Outcome::Block(hit) => {
                 self.report(ctx, log);
-                Ok(Some(Verdict::Respond(self.blocked(ctx, &hit))))
+                Ok(self.answer(ctx, &hit).map(Verdict::Respond))
             }
             Outcome::Skip(_) | Outcome::Allow => Ok(None),
         }
@@ -122,7 +151,7 @@ fn scan(
     };
     /* ctx.client, which is the peer unless a *trusted* proxy said otherwise. Reading
        X-Forwarded-For from anyone would let a client pick its own `ip.src` */
-    let decoded = Decoded::new(req, &ctx.host, ctx.client, ctx.tls, &ctx.geo);
+    let decoded = Decoded::new(req, &ctx.host, ctx.client, ctx.tls, &ctx.geo, &ctx.bot);
     Ok(ctx.zone.waf.rules.evaluate(&decoded.input(body), phase, log))
 }
 
@@ -189,6 +218,70 @@ impl Waf {
                 ctx.req().map(|r| r.uri().path()).unwrap_or("-")
             );
             self.count(ctx, hit, "log");
+        }
+    }
+
+    /// A rule asked this client to prove itself.
+    ///
+    /// Three outcomes, in the order they are cheapest to check: clearance it already holds,
+    /// a solution it is presenting right now, or a fresh puzzle.
+    fn challenge(&self, ctx: &Ctx<'_>, hit: &Match) -> Option<Response<Body>> {
+        /* managed means "only if it looks automated", so a person is waved through without
+           ever seeing an interstitial - which is the entire point of the distinction */
+        if hit.action == crate::waf::Action::ManagedChallenge && ctx.bot.score >= 30 {
+            return None;
+        }
+
+        let client = ctx.client.to_string();
+        let ua = ctx
+            .headers()
+            .and_then(|h| h.get(hyper::header::USER_AGENT))
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+        let now = crate::challenge::now_secs();
+
+        /* already cleared? */
+        if let Some(token) = cookie(ctx, crate::challenge::COOKIE) {
+            if self.clearance.check(&token, &client, &ua, now).is_ok() {
+                return None;
+            }
+        }
+
+        let uri = ctx.uri().cloned().unwrap_or_default();
+        let query = uri.query().unwrap_or("");
+
+        /* presenting a solution? */
+        if let (Some(puzzle), Some(answer)) = (param(query, "__cfl_p"), param(query, "__cfl_a")) {
+            if self.clearance.solved(&puzzle, &answer, &client, now) {
+                self.count(ctx, hit, "challenge_passed");
+                let token = self.clearance.issue(&client, &ua, now);
+                /* back to the url they actually asked for, without the puzzle on it */
+                return Some(crate::pages::cleared(uri.path(), &token));
+            }
+        }
+
+        self.count(ctx, hit, "challenge");
+        warn!(
+            "waf challenge {} {} {} bot={}",
+            hit.rule, ctx.client, ctx.host, ctx.bot.score
+        );
+        Some(crate::pages::challenge(
+            &self.clearance.puzzle(&client, now),
+            self.clearance.bits(),
+        ))
+    }
+
+    /// What a matched rule actually answers with.
+    ///
+    /// `None` means let it through - which only a managed challenge can say, when the
+    /// request did not look automated enough to be worth interrupting.
+    fn answer(&self, ctx: &Ctx<'_>, hit: &Match) -> Option<Response<Body>> {
+        match hit.action {
+            crate::waf::Action::Challenge | crate::waf::Action::ManagedChallenge => {
+                self.challenge(ctx, hit)
+            }
+            _ => Some(self.blocked(ctx, hit)),
         }
     }
 

@@ -48,6 +48,8 @@ pub struct Caller {
     /// Where the client is, looked up once before routing. Empty when no database is
     /// loaded, which is the default.
     pub geo: crate::geoip::Located,
+    /// How automated the request looks, scored once before routing.
+    pub bot: crate::bot::Verdict,
 }
 
 /// Everything a stage is allowed to see about the request in flight.
@@ -70,6 +72,8 @@ pub struct Ctx<'a> {
     /// Country and ASN for `client`, resolved once per request. Both the WAF and the
     /// rate limiter read it, so neither pays for a second lookup.
     pub geo: crate::geoip::Located,
+    /// The bot verdict for this request, scored once for the same reason.
+    pub bot: crate::bot::Verdict,
     req: Option<Request<Body>>,
 }
 
@@ -87,6 +91,7 @@ impl<'a> Ctx<'a> {
             client: caller.client,
             tls: caller.tls,
             geo: caller.geo,
+            bot: caller.bot,
             host,
             cfg,
             zone,
@@ -267,6 +272,7 @@ zones:
                 client: "127.0.0.1".parse().unwrap(),
                 tls: false,
                 geo: Default::default(),
+                bot: Default::default(),
             },
             "demo.local".into(),
             &cfg,

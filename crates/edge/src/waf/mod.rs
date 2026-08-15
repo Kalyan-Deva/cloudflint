@@ -35,6 +35,8 @@ pub struct Decoded<'a> {
     /// Resolved once per request, before any stage runs - two stages asking the same
     /// question of the same database would be two lookups for one answer.
     geo: &'a crate::geoip::Located,
+    /// Scored once per request, for the same reason.
+    bot: &'a crate::bot::Verdict,
 }
 
 impl<'a> Decoded<'a> {
@@ -44,6 +46,7 @@ impl<'a> Decoded<'a> {
         ip: IpAddr,
         tls: bool,
         geo: &'a crate::geoip::Located,
+        bot: &'a crate::bot::Verdict,
     ) -> Self {
         Decoded {
             method: req.method().as_str(),
@@ -58,6 +61,7 @@ impl<'a> Decoded<'a> {
                 true,
             ),
             geo,
+            bot,
         }
     }
 
@@ -79,6 +83,9 @@ impl<'a> Decoded<'a> {
             hosting: self.geo.hosting,
             vpn: self.geo.vpn,
             tor: self.geo.tor,
+            bot_score: self.bot.score,
+            bot_verified: self.bot.verified,
+            bot_name: &self.bot.name,
         }
     }
 }
@@ -102,7 +109,12 @@ pub enum Action {
     Log,
     /// Stop evaluating and let the request through.
     Skip,
+    /// Ask the client to prove itself before letting it through.
     Challenge,
+    /// Ask only when the request looks automated, so a person normally never sees it.
+    /// Spelled out, because `managedchallenge` is not a word anybody would guess.
+    #[serde(rename = "managed_challenge")]
+    ManagedChallenge,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Deserialize, serde::Serialize)]
@@ -277,10 +289,14 @@ impl Ruleset {
                 severity: rule.severity,
             };
             match rule.action {
-                Action::Block => return Outcome::Block(hit),
+                /* a challenge short-circuits exactly like a block; what differs is the
+                   response, and the stage decides that from `hit.action` */
+                Action::Block | Action::Challenge | Action::ManagedChallenge => {
+                    return Outcome::Block(hit)
+                }
                 Action::Skip => return Outcome::Skip(hit),
                 Action::Log => log.push(hit),
-                Action::Challenge => unreachable!("rejected at compile time"),
+
             }
         }
         Outcome::Allow
@@ -375,13 +391,6 @@ fn compile_all(raw: Vec<RawRule>, lists: &Lists) -> Result<Ruleset> {
         if !ids.insert(r.id.clone()) {
             bail!("duplicate rule id `{}`", r.id);
         }
-        if r.action == Action::Challenge {
-            bail!(
-                "rule `{}`: the challenge action needs the proof-of-work interstitial, \
-                 which isn't built yet - use block or log for now",
-                r.id
-            );
-        }
         let rule = compile_one(&r, lists).with_context(|| format!("rule `{}`", r.id))?;
         rules.push(rule);
     }
@@ -466,6 +475,9 @@ mod tests {
             hosting: false,
             vpn: false,
             tor: false,
+            bot_score: 99,
+            bot_verified: false,
+            bot_name: "",
         })
     }
 
@@ -544,6 +556,9 @@ mod tests {
                 hosting: false,
                 vpn: false,
                 tor: false,
+                bot_score: 99,
+                bot_verified: false,
+                bot_name: "",
             };
             let mut log = Vec::new();
             assert!(
@@ -586,6 +601,9 @@ rules:
             hosting: false,
             vpn: false,
             tor: false,
+            bot_score: 99,
+            bot_verified: false,
+            bot_name: "",
         };
         let mut log = Vec::new();
         let out = match rules.evaluate(&input, Phase::Head, &mut log) {
@@ -656,6 +674,9 @@ rules:
             hosting: false,
             vpn: false,
             tor: false,
+            bot_score: 99,
+            bot_verified: false,
+            bot_name: "",
         };
 
         let mut log = Vec::new();
@@ -702,18 +723,22 @@ rules:
     }
 
     #[test]
-    fn says_challenge_is_not_ready() {
-        let raw: RawRuleset = serde_yaml::from_str(
+    fn the_challenge_actions_compile_now_that_there_is_an_interstitial() {
+        /* both of these were refused at config load until there was something to serve */
+        let set = ruleset(
             r#"
 rules:
-  - id: c
-    expression: 'http.host eq "a"'
+  - id: prove-it
     action: challenge
+    expression: >-
+      http.request.uri.path contains "/admin"
+  - id: maybe-prove-it
+    action: managed_challenge
+    expression: >-
+      http.request.uri.path contains "/api"
 "#,
-        )
-        .unwrap();
-        let err = compile_all(raw.rules, &Lists::new()).unwrap_err().to_string();
-        assert!(err.contains("isn't built yet"), "unexpected error: {err}");
+        );
+        assert_eq!(set.len(), 2, "both challenge actions should compile");
     }
 
     #[test]

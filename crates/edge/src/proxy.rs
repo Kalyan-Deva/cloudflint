@@ -30,6 +30,8 @@ struct Outcome {
     client: IpAddr,
     /// Where that client is, when a database is loaded.
     geo: crate::geoip::Located,
+    /// How automated it looked.
+    bot: crate::bot::Verdict,
 }
 
 pub async fn handle(
@@ -100,8 +102,16 @@ pub async fn handle(
         true => String::new(),
         false => format!(" via {}", peer.ip()),
     };
+    /* only when it is interesting: printing "bot 99" on every human request would bury
+       the line that matters. a verified crawler is named, because "googlebot" explains a
+       traffic spike far better than a score does */
+    let bot = match (&outcome.bot, outcome.bot.score) {
+        (v, _) if v.verified => format!(" [{}]", v.name),
+        (_, score) if score < 50 => format!(" [bot {score}]"),
+        _ => String::new(),
+    };
     info!(
-        "{}{via} {method} {path} -> {status} [{}] in {took:?}",
+        "{}{via} {method} {path} -> {status} [{}]{bot} in {took:?}",
         outcome.client, outcome.decided_by
     );
     Ok(outcome.resp)
@@ -141,6 +151,9 @@ async fn route(
         Some(geo) => geo.lookup(client),
         None => crate::geoip::Located::default(),
     };
+    /* scored here too, for the same reason: the waf and the rate limiter both want it and
+       neither should pay for it twice. it needs the geo answer, so it comes after */
+    let bot = edge.bots.assess(client, req.headers(), &geo);
 
     let Some(host) = host_of(&req) else {
         return Outcome {
@@ -149,6 +162,7 @@ async fn route(
             zone: String::new(),
             client,
             geo,
+            bot,
         };
     };
     let Some(zone) = cfg.zone_for(&host) else {
@@ -158,6 +172,7 @@ async fn route(
             zone: String::new(),
             client,
             geo,
+            bot,
         };
     };
 
@@ -172,6 +187,7 @@ async fn route(
             client,
             tls,
             geo,
+            bot,
         },
         host,
         cfg,
@@ -187,6 +203,7 @@ async fn route(
         zone: zone.name.clone(),
         client,
         geo: ctx.geo.clone(),
+        bot: ctx.bot.clone(),
     }
 }
 

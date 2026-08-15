@@ -37,6 +37,12 @@ pub struct Input<'a> {
     pub hosting: bool,
     pub vpn: bool,
     pub tor: bool,
+    /// 1..=99, low meaning automated. See `bot`.
+    pub bot_score: u8,
+    /// A crawler that proved it is who it claims.
+    pub bot_verified: bool,
+    /// The crawler's name when recognised, else empty.
+    pub bot_name: &'a str,
 }
 
 pub type Pred = Box<dyn Fn(&Input) -> bool + Send + Sync>;
@@ -71,6 +77,7 @@ fn cmp(field: &Field, op: Op, operand: &Operand, lists: &Lists) -> Result<Pred> 
         Field::IpHosting => return Ok(Box::new(|i: &Input| i.hosting)),
         Field::IpVpn => return Ok(Box::new(|i: &Input| i.vpn)),
         Field::IpTor => return Ok(Box::new(|i: &Input| i.tor)),
+        Field::BotVerified => return Ok(Box::new(|i: &Input| i.bot_verified)),
         /* deliberately hiding, as opposed to merely being in a datacenter */
         Field::IpAnonymous => return Ok(Box::new(|i: &Input| i.vpn || i.tor)),
         _ => {}
@@ -148,12 +155,19 @@ fn field_pred(field: Field, test: StrTest) -> Pred {
         Field::GeoAsn => i.asn.map(|n| test(&n.to_string())).unwrap_or(false),
         Field::GeoContinent => i.continent.map(&test).unwrap_or(false),
         Field::GeoAsOrg => i.as_org.map(&test).unwrap_or(false),
+        /* the score is compared as its decimal text, like the asn - so `eq`, `in` and
+           `matches` all work without a numeric operand type. `lt`/`gt` would be better and
+           the language has no such operator yet, so a threshold is written as a set or a
+           regex until it does */
+        Field::BotScore => test(&i.bot_score.to_string()),
+        Field::BotName => test(i.bot_name),
         Field::IpSrc
         | Field::Ssl
         | Field::IpHosting
         | Field::IpVpn
         | Field::IpTor
-        | Field::IpAnonymous => unreachable!("compiled separately"),
+        | Field::IpAnonymous
+        | Field::BotVerified => unreachable!("compiled separately"),
     })
 }
 
@@ -278,6 +292,9 @@ mod geo_tests {
             hosting: g.hosting,
             vpn: g.vpn,
             tor: g.tor,
+            bot_score: 99,
+            bot_verified: false,
+            bot_name: "",
         })
     }
 
@@ -556,6 +573,9 @@ mod tests {
                 hosting: false,
                 vpn: false,
                 tor: false,
+                bot_score: 99,
+                bot_verified: false,
+                bot_name: "",
             }
         }
     }
@@ -686,5 +706,78 @@ mod tests {
     fn decode_borrows_when_there_is_nothing_to_do() {
         assert!(matches!(decode("/nothing/here", true), Cow::Borrowed(_)));
         assert!(matches!(decode("/a%20b", true), Cow::Owned(_)));
+    }
+}
+
+#[cfg(test)]
+mod bot_field_tests {
+    use super::*;
+    use crate::waf::Lists;
+
+    fn fires(expr: &str, score: u8, verified: bool, name: &str) -> bool {
+        let ast = crate::waf::parser::parse(expr).expect("expression should parse");
+        let pred = compile(&ast, &Lists::new()).expect("expression should compile");
+        let headers = HeaderMap::new();
+        pred(&Input {
+            method: "GET",
+            uri: "/",
+            path: "/",
+            query: "",
+            host: "demo.local",
+            body: "",
+            headers: &headers,
+            ip: "203.0.113.9".parse().unwrap(),
+            tls: false,
+            country: None,
+            continent: None,
+            asn: None,
+            as_org: None,
+            hosting: false,
+            vpn: false,
+            tor: false,
+            bot_score: score,
+            bot_verified: verified,
+            bot_name: name,
+        })
+    }
+
+    #[test]
+    fn a_score_can_be_matched_exactly_or_as_a_set() {
+        assert!(fires(r#"bot.score eq "1""#, 1, false, ""));
+        assert!(!fires(r#"bot.score eq "1""#, 30, false, ""));
+        assert!(fires(r#"bot.score in ["1", "5", "25"]"#, 25, false, ""));
+    }
+
+    #[test]
+    fn a_threshold_is_written_as_a_pattern_until_there_is_a_lt_operator() {
+        /* single or double digit, i.e. below 100 - the shape a rule takes today */
+        let low = r#"bot.score matches "^[1-9]$|^[1-2][0-9]$""#;
+        assert!(fires(low, 5, false, ""));
+        assert!(fires(low, 29, false, ""));
+        assert!(!fires(low, 30, false, ""));
+        assert!(!fires(low, 99, false, ""));
+    }
+
+    #[test]
+    fn verified_is_a_bare_boolean() {
+        assert!(fires("bot.verified", 20, true, "googlebot"));
+        assert!(!fires("bot.verified", 20, false, "googlebot"));
+        assert!(fires("not bot.verified", 20, false, "googlebot"));
+    }
+
+    #[test]
+    fn a_crawler_can_be_named() {
+        assert!(fires(r#"bot.name eq "googlebot""#, 20, true, "googlebot"));
+        assert!(fires(r#"bot.name in ["googlebot", "bingbot"]"#, 20, true, "bingbot"));
+        assert!(!fires(r#"bot.name eq "googlebot""#, 99, false, ""));
+    }
+
+    #[test]
+    fn the_rule_somebody_actually_writes() {
+        /* automated, and not one of the crawlers we welcome */
+        let expr = r#"bot.score matches "^[1-9]$" and not bot.verified"#;
+        assert!(fires(expr, 5, false, ""), "an unverified bot should match");
+        assert!(!fires(expr, 5, true, "googlebot"), "googlebot should not");
+        assert!(!fires(expr, 99, false, ""), "a person should not");
     }
 }

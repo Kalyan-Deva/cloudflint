@@ -230,6 +230,7 @@ impl Parser {
             "ip.src.is_vpn" => Some(Field::IpVpn),
             "ip.src.is_tor" => Some(Field::IpTor),
             "ip.src.is_anonymous" => Some(Field::IpAnonymous),
+            "bot.verified" => Some(Field::BotVerified),
             _ => None,
         };
         if let Some(field) = bare {
@@ -326,6 +327,8 @@ fn field_from(name: &str, key: Option<&str>, at: usize) -> Result<Field> {
         ("ip.geoip.asnum", None) => Field::GeoAsn,
         ("ip.geoip.continent", None) => Field::GeoContinent,
         ("ip.geoip.asorg", None) => Field::GeoAsOrg,
+        ("bot.score", None) => Field::BotScore,
+        ("bot.name", None) => Field::BotName,
         (_, Some(_)) => bail!("`{name}` does not take a [\"...\"] key (column {col})"),
         _ => {
             return Err(anyhow!(
@@ -335,7 +338,8 @@ fn field_from(name: &str, key: Option<&str>, at: usize) -> Result<Field> {
                  \x20     http.request.headers[\"...\"], ip.src, ssl,\n\
                  \x20     ip.geoip.country, ip.geoip.continent, ip.geoip.asnum,\n\
                  \x20     ip.geoip.asorg, ip.src.is_hosting, ip.src.is_vpn,\n\
-                 \x20     ip.src.is_tor, ip.src.is_anonymous"
+                 \x20     ip.src.is_tor, ip.src.is_anonymous,\n\
+                 \x20     bot.score, bot.name, bot.verified"
             ))
         }
     };

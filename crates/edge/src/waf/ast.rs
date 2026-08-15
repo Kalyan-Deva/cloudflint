@@ -24,6 +24,12 @@ pub enum Field {
     IpVpn,
     IpTor,
     IpAnonymous,
+    /// How automated the request looks, 1..=99.
+    BotScore,
+    /// A crawler that proved itself. A bare boolean, like `ssl`.
+    BotVerified,
+    /// The recognised crawler's name.
+    BotName,
     /// Autonomous system number. Compared as its decimal text, so `eq "64512"` and
     /// `in {"64512" "64513"}` work with the same machinery every other field uses.
     GeoAsn,
@@ -53,7 +59,12 @@ impl Field {
     pub fn is_bare_bool(&self) -> bool {
         matches!(
             self,
-            Field::Ssl | Field::IpHosting | Field::IpVpn | Field::IpTor | Field::IpAnonymous
+            Field::Ssl
+                | Field::IpHosting
+                | Field::IpVpn
+                | Field::IpTor
+                | Field::IpAnonymous
+                | Field::BotVerified
         )
     }
 }

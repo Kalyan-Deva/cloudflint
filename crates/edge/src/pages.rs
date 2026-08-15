@@ -72,6 +72,64 @@ fn page(status: StatusCode, heading: &str, message: &str) -> Response<Body> {
         .expect("static page is always valid")
 }
 
+/// The interstitial. Solves a hashcash puzzle in the browser, then re-requests the page
+/// with the answer on the query string - so there is no separate verify endpoint to guard,
+/// and a client that cannot run JavaScript simply never gets through, which is the point.
+pub fn challenge(puzzle: &str, bits: u32) -> Response<Body> {
+    let html = format!(
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>Checking your browser</title><style>
+body{{font:15px/1.6 -apple-system,Segoe UI,sans-serif;background:#14161a;color:#e6e3dd;
+display:grid;place-items:center;height:100vh;margin:0}}
+.card{{border:1px solid #2a2e35;border-radius:5px;background:#1c1f24;padding:26px 30px;max-width:420px}}
+h1{{font-size:17px;margin:0 0 8px}}p{{color:#8b9099;margin:0}}
+.bar{{height:3px;background:#2a2e35;border-radius:2px;margin-top:18px;overflow:hidden}}
+.fill{{height:100%;width:0;background:#c9784a;transition:width .2s}}</style></head>
+<body><div class="card"><h1>Checking your browser</h1>
+<p>This takes a moment and happens once.</p><div class="bar"><div class="fill" id="f"></div></div>
+<noscript><p style="color:#b8574d;margin-top:14px">JavaScript is required to continue.</p></noscript>
+</div><script>
+const puzzle={puzzle:?}, bits={bits};
+async function sha(s){{const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s));
+return new Uint8Array(b)}}
+function zeros(a){{let n=0;for(const b of a){{if(b===0){{n+=8;continue}}
+let v=b,c=0;while(v<128){{c++;v<<=1}}return n+c}}return n}}
+(async()=>{{for(let n=0;n<50000000;n++){{
+if(n%2000===0)document.getElementById('f').style.width=Math.min(95,n/400)+'%';
+if(zeros(await sha(puzzle+n))>=bits){{
+const u=new URL(location.href);u.searchParams.set('__cfl_p',puzzle);u.searchParams.set('__cfl_a',n);
+location.replace(u.toString());return}}}}}})();
+</script></body></html>"#
+    );
+
+    Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .header(hyper::header::CONTENT_TYPE, "text/html; charset=utf-8")
+        /* never cached: the puzzle is single-use and client-bound */
+        .header(hyper::header::CACHE_CONTROL, "no-store")
+        .body(full(html))
+        .expect("the interstitial is always valid")
+}
+
+/// Passed. Sets clearance and sends them to the page they asked for.
+pub fn cleared(path: &str, token: &str) -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::FOUND)
+        .header(hyper::header::LOCATION, path)
+        .header(hyper::header::CACHE_CONTROL, "no-store")
+        /* HttpOnly so script cannot read it, SameSite=Lax so it survives a normal
+           navigation without riding along on cross-site requests */
+        .header(
+            hyper::header::SET_COOKIE,
+            format!(
+                "{}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=1800",
+                crate::challenge::COOKIE
+            ),
+        )
+        .body(full(""))
+        .expect("the clearance redirect is always valid")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,3 +151,4 @@ mod tests {
         assert_eq!(now.headers().get(header::RETRY_AFTER).unwrap(), "1");
     }
 }
+

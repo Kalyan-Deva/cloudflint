@@ -25,12 +25,13 @@ pub fn build(
     metrics: Arc<Metrics>,
     fetcher: Arc<origin::Fetcher>,
     buckets: Arc<Buckets>,
+    clearance: Arc<crate::challenge::Challenges>,
 ) -> Pipeline {
     let health = Arc::new(Health::new());
 
     Pipeline::new(vec![
         Box::new(ratelimit::RateLimit::new(buckets, health, metrics.clone())) as Box<dyn Stage>,
-        Box::new(waf::Waf::new(metrics)),
+        Box::new(waf::Waf::new(metrics, clearance)),
         Box::new(cache::Cache::new(store, fetcher.clone())),
         Box::new(origin::Origin::new(fetcher)),
     ])
