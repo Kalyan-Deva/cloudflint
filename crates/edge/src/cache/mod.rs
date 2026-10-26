@@ -3,6 +3,7 @@
 //! Sharded so a hot key doesn't serialise every other lookup behind one mutex. Each
 //! shard keeps its own byte budget and evicts its own least-recently-used entries.
 
+pub mod disk;
 pub mod inflight;
 pub mod policy;
 pub mod tee;
