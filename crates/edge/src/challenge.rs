@@ -228,6 +228,107 @@ pub fn node_secret() -> [u8; 32] {
     out
 }
 
+/// A CAPTCHA provider, for the cases proof of work cannot carry alone.
+///
+/// Deliberately provider-agnostic. Turnstile, hCaptcha and reCAPTCHA all work the same way -
+/// a widget script renders a box, the browser posts a response token, and the server hands
+/// that token plus a secret to a verify endpoint that answers `{"success":true}`. So the
+/// three differ only in two urls and a field name, and none of them is baked in here.
+///
+/// **The secret comes from the environment, never from config** - config travels between
+/// nodes and is editable in the dashboard, which is the rule every other credential follows.
+///
+/// This is an escalation, not the front line. Proof of work costs a visitor nothing and
+/// stops cheap automation; a CAPTCHA costs a visitor real effort and stops the rest. Asking
+/// for one on every challenge would be a tax on people to inconvenience machines.
+#[derive(Debug, Clone)]
+pub struct Captcha {
+    /// Where the browser widget's script comes from.
+    pub script_url: String,
+    /// Where this node posts the token to be checked.
+    pub verify_url: String,
+    /// The public key the widget renders with.
+    pub site_key: String,
+    /// The class the widget looks for - `cf-turnstile`, `h-captcha`, `g-recaptcha`.
+    pub widget_class: String,
+    /// The form field the widget writes its token into.
+    pub response_field: String,
+    /// Read from `CLOUDFLINT_CAPTCHA_SECRET` at boot; never in config.
+    pub secret: String,
+}
+
+/// Known providers, so config names one rather than spelling out four urls.
+impl Captcha {
+    pub fn preset(name: &str, site_key: String, secret: String) -> Option<Captcha> {
+        let (script, verify, class, field) = match name {
+            "turnstile" => (
+                "https://challenges.cloudflare.com/turnstile/v0/api.js",
+                "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+                "cf-turnstile",
+                "cf-turnstile-response",
+            ),
+            "hcaptcha" => (
+                "https://js.hcaptcha.com/1/api.js",
+                "https://api.hcaptcha.com/siteverify",
+                "h-captcha",
+                "h-captcha-response",
+            ),
+            "recaptcha" => (
+                "https://www.google.com/recaptcha/api.js",
+                "https://www.google.com/recaptcha/api/siteverify",
+                "g-recaptcha",
+                "g-recaptcha-response",
+            ),
+            _ => return None,
+        };
+        Some(Captcha {
+            script_url: script.into(),
+            verify_url: verify.into(),
+            site_key,
+            widget_class: class.into(),
+            response_field: field.into(),
+            secret,
+        })
+    }
+
+    /// The form body a verify call carries. Every one of the three takes these two names.
+    pub fn verify_body(&self, token: &str, client: &str) -> String {
+        format!(
+            "secret={}&response={}&remoteip={}",
+            urlencode(&self.secret),
+            urlencode(token),
+            urlencode(client)
+        )
+    }
+
+    /// Did the provider say yes?
+    ///
+    /// Anything that is not an explicit success is a failure - a provider that is down, or
+    /// answering something we do not recognise, must not become a way through.
+    pub fn passed(&self, body: &[u8]) -> bool {
+        let Ok(text) = std::str::from_utf8(body) else {
+            return false;
+        };
+        match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(v) => v.get("success").and_then(|s| s.as_bool()).unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+}
+
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,3 +494,63 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod captcha_tests {
+    use super::*;
+
+    fn turnstile() -> Captcha {
+        Captcha::preset("turnstile", "site-abc".into(), "secret-xyz".into()).unwrap()
+    }
+
+    #[test]
+    fn the_three_providers_are_known_and_others_are_not() {
+        for name in ["turnstile", "hcaptcha", "recaptcha"] {
+            let c = Captcha::preset(name, "k".into(), "s".into());
+            assert!(c.is_some(), "{name} should be known");
+        }
+        assert!(Captcha::preset("something-else", "k".into(), "s".into()).is_none());
+    }
+
+    #[test]
+    fn each_provider_brings_its_own_field_names() {
+        assert_eq!(turnstile().response_field, "cf-turnstile-response");
+        assert_eq!(
+            Captcha::preset("hcaptcha", "k".into(), "s".into()).unwrap().widget_class,
+            "h-captcha"
+        );
+    }
+
+    #[test]
+    fn a_verify_body_carries_the_secret_the_token_and_the_client() {
+        let body = turnstile().verify_body("tok123", "203.0.113.9");
+        assert!(body.contains("secret=secret-xyz"), "{body}");
+        assert!(body.contains("response=tok123"), "{body}");
+        assert!(body.contains("remoteip=203.0.113.9"), "{body}");
+    }
+
+    #[test]
+    fn anything_in_the_token_is_encoded_rather_than_trusted() {
+        /* a token is attacker-supplied; unescaped it could add its own form fields */
+        let body = turnstile().verify_body("a&secret=mine", "1.2.3.4");
+        assert!(!body.contains("&secret=mine"), "token broke out of its field: {body}");
+        assert!(body.contains("a%26secret%3Dmine"), "{body}");
+    }
+
+    #[test]
+    fn only_an_explicit_success_passes() {
+        let c = turnstile();
+        assert!(c.passed(br#"{"success":true}"#));
+        assert!(!c.passed(br#"{"success":false,"error-codes":["invalid-input-response"]}"#));
+    }
+
+    #[test]
+    fn a_provider_that_is_down_or_odd_is_not_a_way_through() {
+        /* the failure that matters: an outage at the provider must not open the door */
+        let c = turnstile();
+        assert!(!c.passed(b""));
+        assert!(!c.passed(b"<html>502 Bad Gateway</html>"));
+        assert!(!c.passed(br#"{"success":"true"}"#), "a string is not a yes");
+        assert!(!c.passed(br#"{}"#));
+        assert!(!c.passed(&[0xff, 0xfe]), "invalid utf-8 must not panic");
+    }
+}
